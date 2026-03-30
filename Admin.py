@@ -21,11 +21,9 @@ from shared_services import PlotSyncService
 from events import generate_brix_time_series, compute_brix_image
 
 # Initialize Earth Engine - move this to the top
-try:
-    ee.Authenticate()
-    ee.Initialize(project="cropeye-483404")
-except Exception as e:
-    print(f"Warning: Earth Engine initialization failed: {e}")
+raw = os.environ["EE_SERVICE_ACCOUNT_JSON"]
+service_account = raw if isinstance(raw, str) else json.dumps(raw)
+ee.Initialize(ee.ServiceAccountCredentials(None, key_data=service_account))
     
 app =FastAPI(tittle="Admin API for SAR Index Mapping with Pest Detection")
 app.add_middleware(
