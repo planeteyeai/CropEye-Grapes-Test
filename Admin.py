@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 import matplotlib.colors as mcolors
 from plotly.subplots import make_subplots
 import numpy as np
+import os
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, Request
