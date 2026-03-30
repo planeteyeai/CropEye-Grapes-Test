@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>GEE Tile Visualization</title>
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet/dist/leaflet.css"/>
+  <script src="https://unpkg.com/leaflet/dist/leaflet.js"></script>
+
+  <!-- Leaflet Image Export -->
+  <script src="https://unpkg.com/leaflet-image/leaflet-image.js"></script>
+
+  <!-- High quality canvas resize -->
+  <script src="https://unpkg.com/pica@9.0.1/dist/pica.min.js"></script>
+
+  <style>
+    .save-btn {
+      position: absolute;
+      top: 10px;
+      right: 10px;
+      z-index: 1000;
+      padding: 8px 12px;
+      background: white;
+      border: 1px solid #ccc;
+      cursor: pointer;
+      font-size: 14px;
+    }
+  </style>
+</head>
+
+<body style="margin:0; padding:0;">
+  <div id="map" style="width:100%; height:100vh;"></div>
+  <button class="save-btn" onclick="saveMap300DPI()">Save PNG (300 DPI)</button>
+
+<script>
+  const apiUrl =
+    "http://192.168.41.66:3000/grapes/canopy-vigour1?plot_name=13D_13";
+
+  let map;
+
+  fetch(apiUrl, { method: "POST" })
+    .then(res => res.json())
+    .then(data => {
+      const feature = data.features[0];
+      const tileUrl = feature.properties.tile_url;
+
+      map = L.map("map");
+
+      // GEE tiles (CORS REQUIRED)
+      L.tileLayer(tileUrl, {
+        attribution: "Google Earth Engine",
+        maxZoom: 20,
+        crossOrigin: true
+      }).addTo(map);
+
+      // Fit to geometry bounds (no layer added)
+      const bounds = L.geoJSON(feature.geometry).getBounds();
+      map.fitBounds(bounds, { padding: [20, 20], maxZoom: 18 });
+    })
+    .catch(err => console.error(err));
+
+  /* ===============================
+     300 DPI PRINT EXPORT
+     =============================== */
+
+  function saveMap300DPI() {
+    const DPI = 300;
+    const SCALE = 4; // 4× resolution (print safe)
+
+    map.once("idle", async () => {
+      leafletImage(map, async (err, canvas) => {
+        if (err) return console.error(err);
+
+        // Upscale canvas
+        const out = document.createElement("canvas");
+        out.width = canvas.width * SCALE;
+        out.height = canvas.height * SCALE;
+
+        await pica().resize(canvas, out, { quality: 3 });
+
+        // Convert to PNG
+        const blob = await new Promise(r => out.toBlob(r, "image/png"));
+        const buffer = new Uint8Array(await blob.arrayBuffer());
+
+        // Inject 300 DPI metadata
+        const ppm = Math.round(DPI / 0.0254);
+        const png300 = insertChunk(buffer, createPHYSChunk(ppm, ppm));
+
+        const url = URL.createObjectURL(
+          new Blob([png300], { type: "image/png" })
+        );
+
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = "map_300dpi.png";
+        link.click();
+      });
+    });
+
+    map.invalidateSize();
+  }
+
+  /* ===============================
+     PNG DPI HELPERS
+     =============================== */
+
+  function createPHYSChunk(xppm, yppm) {
+    const data = new Uint8Array(9);
+    const view = new DataView(data.buffer);
+    view.setUint32(0, xppm);
+    view.setUint32(4, yppm);
+    data[8] = 1;
+    return createChunk("pHYs", data);
+  }
+
+  function createChunk(type, data) {
+    const crc = crc32(type, data);
+    const out = new Uint8Array(12 + data.length);
+    const v = new DataView(out.buffer);
+    v.setUint32(0, data.length);
+    out.set(type.split("").map(c => c.charCodeAt(0)), 4);
+    out.set(data, 8);
+    v.setUint32(8 + data.length, crc);
+    return out;
+  }
+
+  function insertChunk(png, chunk) {
+    const iend = png.lastIndexOf(73) - 4;
+    const out = new Uint8Array(png.length + chunk.length);
+    out.set(png.slice(0, iend), 0);
+    out.set(chunk, iend);
+    out.set(png.slice(iend), iend + chunk.length);
+    return out;
+  }
+
+  function crc32(type, data) {
+    let crc = 0xffffffff;
+    [...type].forEach(c => crc = crcTable[(crc ^ c.charCodeAt(0)) & 0xff] ^ (crc >>> 8));
+    data.forEach(b => crc = crcTable[(crc ^ b) & 0xff] ^ (crc >>> 8));
+    return (crc ^ 0xffffffff) >>> 0;
+  }
+
+  const crcTable = (() => {
+    let c, table = [];
+    for (let n = 0; n < 256; n++) {
+      c = n;
+      for (let k = 0; k < 8; k++)
+        c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      table[n] = c;
+    }
+    return table;
+  })();
+</script>
+</body>
+</html>
