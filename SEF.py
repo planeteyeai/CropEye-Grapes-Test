@@ -13,11 +13,9 @@ import math
 from shared_services import PlotSyncService
 from fastapi.middleware.cors import CORSMiddleware
 # Initialize Earth Engine
-try:
-    ee.Authenticate()
-    ee.Initialize(project="cropeye-483404")
-except Exception as e:
-    print(f"Warning: Earth Engine initialization failed: {e}")
+raw = os.environ["EE_SERVICE_ACCOUNT_JSON"]
+service_account = raw if isinstance(raw, str) else json.dumps(raw)
+ee.Initialize(ee.ServiceAccountCredentials(None, key_data=service_account))
 
 # Initialize plot sync service
 plot_sync_service = PlotSyncService()
