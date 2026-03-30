@@ -25,7 +25,7 @@ from shared_services import PlotSyncService, _clean_numbers
 # -------------------------------
 # Earth Engine Initialization
 # -------------------------------
-_ee_executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ee_")
+
 
 raw = os.environ["EE_SERVICE_ACCOUNT_JSON"]
 service_account = raw if isinstance(raw, str) else json.dumps(raw)
