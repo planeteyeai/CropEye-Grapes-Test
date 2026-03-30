@@ -1,6 +1,6 @@
   # Includes Brix/Recovery analysis, vegetation indices, biomass, stress events, and irrigation detection
 # Comprehensive Agriculture Analysis API - Merged Version
- 
+import os
 from shapely import geometry
 
 from fastapi import FastAPI, HTTPException, Query
