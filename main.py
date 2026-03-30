@@ -15,11 +15,14 @@ from datetime import datetime, timedelta, date
 # Initialize Earth Engine
 # ------------------------------
 
-try:
-    ee.Authenticate()
-    ee.Initialize(project="cropeye-483404")
-except Exception as e:
-    print(f"Warning: Earth Engine initialization failed: {e}")
+def _init_earth_engine():
+    raw = os.environ.get("EE_SERVICE_ACCOUNT_JSON")
+    if not raw:
+        raise ValueError("EE_SERVICE_ACCOUNT_JSON env var is required. Set it in Railway Variables.")
+    sa = json.dumps(raw) if not isinstance(raw, str) else raw
+    ee.Initialize(ee.ServiceAccountCredentials(None, key_data=sa))
+
+_init_earth_engine()
 
 # ------------------------------
 # FastAPI Setup
