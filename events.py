@@ -25,11 +25,9 @@ from shared_services import PlotSyncService, _clean_numbers
 # -------------------------------
 # Earth Engine Initialization
 # -------------------------------
-try:
-    ee.Authenticate()
-    ee.Initialize(project="cropeye-483404")
-except Exception as e:
-    raise RuntimeError(f"Earth Engine failed to initialize: {e}")
+raw = os.environ["EE_SERVICE_ACCOUNT_JSON"]
+service_account = raw if isinstance(raw, str) else json.dumps(raw)
+ee.Initialize(ee.ServiceAccountCredentials(None, key_data=service_account))
  
 # Initialize plot sync service
 plot_sync_service = PlotSyncService()
