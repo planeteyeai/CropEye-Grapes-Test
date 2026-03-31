@@ -42,6 +42,26 @@ keepalive_manager: Optional[PlotKeepAliveManager] = None
 def _apply_plot_update(new_plots: Dict[str, Dict]) -> None:
     global plot_dict
     plot_dict = new_plots
+    print(f"SEF.py background refresh: {len(plot_dict)} plots")
+
+def _resolve_plot_or_refresh(plot_identifier: str):
+    global plot_dict
+    if plot_identifier in plot_dict:
+        return plot_identifier, plot_dict[plot_identifier]
+    for name, pdata in plot_dict.items():
+        django_id = pdata.get("properties", {}).get("django_id") or pdata.get("django_id")
+        if str(django_id) == str(plot_identifier):
+            return name, pdata
+    fresh = plot_sync_service.get_plots_dict(force_refresh=True)
+    if fresh:
+        _apply_plot_update(fresh)
+    if plot_identifier in plot_dict:
+        return plot_identifier, plot_dict[plot_identifier]
+    for name, pdata in plot_dict.items():
+        django_id = pdata.get("properties", {}).get("django_id") or pdata.get("django_id")
+        if str(django_id) == str(plot_identifier):
+            return name, pdata
+    raise HTTPException(status_code=404, detail="Plot not found (tried instant refresh)")
 
 def find_plot_by_name(plot_name: str) -> Optional[Dict]:
     """Find plot by name with flexible matching"""
@@ -79,7 +99,17 @@ def find_plot_by_name(plot_name: str) -> Optional[Dict]:
             print(f"Found plot '{plot_name}' using variation '{variation}'")
             return plot_dict[variation]
     
-    print(f"Plot '{plot_name}' not found. Available plots: {list(plot_dict.keys())}")
+    # Final attempt: instant refresh from Django and retry
+    fresh = plot_sync_service.get_plots_dict(force_refresh=True)
+    if fresh:
+        _apply_plot_update(fresh)
+        if plot_name in plot_dict:
+            return plot_dict[plot_name]
+        for variation in variations:
+            if variation in plot_dict:
+                return plot_dict[variation]
+
+    print(f"Plot '{plot_name}' not found after refresh. Available plots: {list(plot_dict.keys())}")
     return None
 
 
@@ -628,8 +658,7 @@ async def compute_et_for_plot(
     end_date: Optional[str] = Query(default=None)
 ):
     """Compute ET for a specific plot"""
-    if plot_name not in plot_dict:
-        raise HTTPException(status_code=404, detail="Plot not found")
+    _, plot = _resolve_plot_or_refresh(plot_name)
    
     # Set both start_date and end_date to current date if not provided
     today = date.today().strftime('%Y-%m-%d')
@@ -639,12 +668,12 @@ async def compute_et_for_plot(
         start_date = today
    
     try:
-        geometry = plot_dict[plot_name]['geometry']
+        geometry = plot['geometry']
         area_hectares = geometry.area().divide(10000).getInfo()
        
         # Get plot coordinates
-        coords = plot_dict[plot_name]['original_coords']
-        geom_type = plot_dict[plot_name]['geom_type']
+        coords = plot['original_coords']
+        geom_type = plot['geom_type']
        
         if geom_type == 'Polygon':
             lon, lat = coords[0][0]
@@ -771,11 +800,10 @@ async def fetch_rainfall(lat: float, lon: float, start: date, end: date):
 # ============================
 @app.post("/soil-moisture/{plot_name}")
 async def soil_moisture(plot_name: str):
-    if plot_name not in plot_dict:
-        raise HTTPException(status_code=404, detail="Plot not found")
+    _, plot = _resolve_plot_or_refresh(plot_name)
 
-    coords = plot_dict[plot_name]['original_coords']
-    geom_type = plot_dict[plot_name]['geom_type']
+    coords = plot['original_coords']
+    geom_type = plot['geom_type']
 
     if geom_type == 'Polygon':
         lon, lat = coords[0][0]
@@ -815,7 +843,7 @@ async def soil_moisture(plot_name: str):
         et_end = current_day - timedelta(days=1)
         et_start = et_end-timedelta(days=7) 
         et_mean = calculate_et_statistics_soil(
-            plot_dict[plot_name]['geometry'],
+            plot['geometry'],
             et_start.strftime("%Y-%m-%d"),
             et_end.strftime("%Y-%m-%d")
         )

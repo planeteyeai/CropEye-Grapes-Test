@@ -167,6 +167,26 @@ plot_dict: Dict[str, Dict[str, Any]] = {}
 def _apply_plot_update(new_plots: Dict[str, Dict[str, Any]]) -> None:
     global plot_dict
     plot_dict = new_plots
+    print(f"Admin.py background refresh: {len(plot_dict)} plots")
+
+def _resolve_plot_or_refresh(plot_identifier: str):
+    global plot_dict
+    if plot_identifier in plot_dict:
+        return plot_identifier, plot_dict[plot_identifier]
+    for name, pdata in plot_dict.items():
+        django_id = pdata.get("properties", {}).get("django_id") or pdata.get("django_id")
+        if str(django_id) == str(plot_identifier):
+            return name, pdata
+    fresh = plot_sync_service.get_plots_dict(force_refresh=True)
+    if fresh:
+        _apply_plot_update(fresh)
+    if plot_identifier in plot_dict:
+        return plot_identifier, plot_dict[plot_identifier]
+    for name, pdata in plot_dict.items():
+        django_id = pdata.get("properties", {}).get("django_id") or pdata.get("django_id")
+        if str(django_id) == str(plot_identifier):
+            return name, pdata
+    raise HTTPException(status_code=404, detail="Plot not found (tried instant refresh)")
 
 def get_latest_satellite_update(collection) -> str:
     """Get the latest satellite update date from the collection"""
@@ -640,10 +660,8 @@ async def get_plots():
 @app.get("/plots/{plot_name}/info", response_model=PlotInfo)
 async def get_plot_info_with_dates(plot_name: str):
     """Get information about a specific plot including recent dates"""
-    if plot_name not in plot_dict:
-        raise HTTPException(status_code=404, detail="Plot not found")
-   
-    geom = plot_dict[plot_name]['geometry']
+    _, plot = _resolve_plot_or_refresh(plot_name)
+    geom = plot['geometry']
     try:
         area = geom.area().divide(10000).getInfo()
     except Exception as e:
@@ -673,11 +691,8 @@ async def analyze_plot_combined(
     Analyze plot growth using Sentinel-1 VH or Sentinel-2 NDVI.
     Sentinel-2 is preferred if both datasets are available.
     """
-    if plot_name not in plot_dict:
-        raise HTTPException(status_code=404, detail="Plot not found")
-
     try:
-        plot_data = plot_dict[plot_name]
+        _, plot_data = _resolve_plot_or_refresh(plot_name)
         geometry = plot_data["geometry"]
         area_hectares = geometry.area().divide(10000).getInfo()
 
@@ -883,11 +898,8 @@ async def analyze_water_uptake(
 ):
     """Analyze water uptake using Sentinel-1 ?VH or Sentinel-2 NDMI (choose latest)"""
  
-    if plot_name not in plot_dict:
-        raise HTTPException(status_code=404, detail="Plot not found")
- 
     try:
-        plot_data = plot_dict[plot_name]
+        _, plot_data = _resolve_plot_or_refresh(plot_name)
         geometry = plot_data["geometry"]
  
         analysis_start = ee.Date(start_date)
@@ -1092,11 +1104,8 @@ async def analyze_plot_combined(
     Priority: Latest image date, with S2 preferred if both available on same date.
     """
    
-    if plot_name not in plot_dict:
-        raise HTTPException(status_code=404, detail="Plot not found")
- 
     try:
-        plot_data = plot_dict[plot_name]
+        _, plot_data = _resolve_plot_or_refresh(plot_name)
         geometry = plot_data["geometry"]
  
         # === Check Sentinel-1 Availability ===
@@ -1631,12 +1640,11 @@ async def pest_detection_by_crop(
         today - timedelta(days=15)
     ).strftime("%Y-%m-%d")
 
-    if plot_name not in plot_dict:
-        raise HTTPException(status_code=404, detail="Plot not found")
+    resolved_name, resolved_plot = _resolve_plot_or_refresh(plot_name)
 
     result = run_pest_detection_analysis_by_plot(
-        plot_name=plot_name,
-        plot_data=plot_dict[plot_name],
+        plot_name=resolved_name,
+        plot_data=resolved_plot,
         start_date=start_date,
         end_date=end_date,
     )
@@ -1655,15 +1663,12 @@ def grapes_canopy_vigour(
     end_date: str | None = Query(None),
 ):
 
-    if plot_name not in plot_dict:
-        raise HTTPException(status_code=404, detail="Plot not found")
+    _, plot_data = _resolve_plot_or_refresh(plot_name)
 
     # -------------------- DEFAULT DATES --------------------
     today = datetime.utcnow().date()
     end_date = end_date or today.strftime("%Y-%m-%d")
     start_date = start_date or (today - timedelta(days=15)).strftime("%Y-%m-%d")
-
-    plot_data = plot_dict[plot_name]
 
     geometry = ee.Geometry(plot_data["geometry"])
     geom_type = plot_data["geom_type"]
@@ -1847,8 +1852,7 @@ async def grapes_brix_grid_values(
     end_date: str | None = None,
 ):
 
-    if plot_name not in plot_dict:
-        raise HTTPException(status_code=404, detail="Plot not found")
+    _, plot = _resolve_plot_or_refresh(plot_name)
 
     # ---------------- DEFAULT DATES ----------------
     today = datetime.utcnow().date()
@@ -1857,7 +1861,6 @@ async def grapes_brix_grid_values(
         today - timedelta(days=15)
     ).strftime("%Y-%m-%d")
 
-    plot = plot_dict[plot_name]
     geometry = ee.Geometry(plot["geometry"])
 
     # ---------------- CROP TYPE ----------------
@@ -1943,11 +1946,10 @@ async def get_plot_tiles(
     start_date: str = Depends(lambda end_date=Query(default=date.today().strftime('%Y-%m-%d')): default_start_date(end_date)),
 ):
     """Get tile URLs for a plot"""
-    if plot_name not in plot_dict:
-        raise HTTPException(status_code=404, detail="Plot not found")
+    _, plot = _resolve_plot_or_refresh(plot_name)
    
     try:
-        aoi = plot_dict[plot_name]['geometry']
+        aoi = plot['geometry']
         print(f" Generating tiles for {plot_name}")
        
         # Get image collection
@@ -2013,11 +2015,10 @@ async def check_satellite_updates(
     start_date: str = Query(..., description="Start date in YYYY-MM-DD format")
 ):
     """Check for satellite updates for a specific plot"""
-    if plot_name not in plot_dict:
-        raise HTTPException(status_code=404, detail="Plot not found")
+    _, plot = _resolve_plot_or_refresh(plot_name)
    
     try:
-        aoi = plot_dict[plot_name]['geometry']
+        aoi = plot['geometry']
        
         # Get current collection info
         coll = filter_s1(

@@ -90,7 +90,17 @@ def find_plot_by_name(plot_name: str) -> Optional[Dict]:
             print(f"Found plot '{plot_name}' using variation '{variation}'")
             return plot_dict[variation]
     
-    print(f"Plot '{plot_name}' not found. Available plots: {list(plot_dict.keys())}")
+    # Final attempt: instant refresh from Django and retry
+    fresh = plot_sync_service.get_plots_dict(force_refresh=True)
+    if fresh:
+        _apply_plot_update(fresh)
+        if plot_name in plot_dict:
+            return plot_dict[plot_name]
+        for variation in variations:
+            if variation in plot_dict:
+                return plot_dict[variation]
+
+    print(f"Plot '{plot_name}' not found after refresh. Available plots: {list(plot_dict.keys())}")
     return None
 
 def get_plot_feature_collection():
@@ -106,6 +116,26 @@ def _apply_plot_update(new_plots: Dict[str, Dict]) -> None:
     global plot_dict, plot_fc
     plot_dict = new_plots
     plot_fc = get_plot_feature_collection()
+    print(f"events.py background refresh: {len(plot_dict)} plots")
+
+def _resolve_plot_or_refresh(plot_identifier: str):
+    global plot_dict, plot_fc
+    if plot_identifier in plot_dict:
+        return plot_identifier, plot_dict[plot_identifier]
+    for name, pdata in plot_dict.items():
+        django_id = pdata.get("properties", {}).get("django_id") or pdata.get("django_id")
+        if str(django_id) == str(plot_identifier):
+            return name, pdata
+    fresh = plot_sync_service.get_plots_dict(force_refresh=True)
+    if fresh:
+        _apply_plot_update(fresh)
+    if plot_identifier in plot_dict:
+        return plot_identifier, plot_dict[plot_identifier]
+    for name, pdata in plot_dict.items():
+        django_id = pdata.get("properties", {}).get("django_id") or pdata.get("django_id")
+        if str(django_id) == str(plot_identifier):
+            return name, pdata
+    raise HTTPException(status_code=404, detail="Plot not found (tried instant refresh)")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -1811,10 +1841,7 @@ def grapes_ripening_stage(
     end_date = end_date or today.strftime("%Y-%m-%d")
     start_date = start_date or (today - timedelta(days=15)).strftime("%Y-%m-%d")
 
-    if plot_name not in plot_dict:
-        raise HTTPException(status_code=404, detail="Plot not found")
-
-    plot = plot_dict[plot_name]
+    _, plot = _resolve_plot_or_refresh(plot_name)
     geometry = ee.Geometry(plot["geometry"])
 
     # ---------------- SENTINEL 2 ----------------
@@ -1929,10 +1956,8 @@ def grapes_yield_estimation(
     plot_name: str,
     start_date: str | None = None,
 ):
-    if plot_name not in plot_dict:
-        raise HTTPException(status_code=404, detail="Plot not found")
-
-    geometry = plot_dict[plot_name]["geometry"]
+    _, plot = _resolve_plot_or_refresh(plot_name)
+    geometry = plot["geometry"]
 
     # -------------------- DEFAULT DATES --------------------
     today = datetime.utcnow().date()
@@ -2120,10 +2145,7 @@ def grapes_brix_time_series(plot_name: str):
     plot_service = PlotSyncService()
     plot_dict = plot_service.get_plots_dict(force_refresh=True)
 
-    if plot_name not in plot_dict:
-        raise HTTPException(status_code=404, detail="Plot not found")
-
-    plot = plot_dict[plot_name]
+    _, plot = _resolve_plot_or_refresh(plot_name)
     geometry = ee.Geometry(plot["geometry"])
     properties = plot.get("properties", {})
 
@@ -2858,10 +2880,7 @@ async def sugarcane_harvest_endpoint(
     end_date: str = Query(default_factory=lambda: date.today().strftime("%Y-%m-%d")),
 ):
  
-    if plot_name not in plot_dict:
-        raise HTTPException(status_code=404, detail="Plot not found")
- 
-    plot_data = plot_dict[plot_name]
+    _, plot_data = _resolve_plot_or_refresh(plot_name)
     props = plot_data["properties"]
  
     auto_plantation_date = props.get("plantation_date")

@@ -37,6 +37,27 @@ keepalive_manager: Optional[PlotKeepAliveManager] = None
 def _apply_plot_update(new_plots: Dict[str, Dict]) -> None:
     global plot_dict
     plot_dict = new_plots
+    print(f"main.py background refresh: {len(plot_dict)} plots")
+
+def _resolve_plot_or_refresh(plot_identifier: str):
+    global plot_dict
+    if plot_identifier in plot_dict:
+        return plot_identifier, plot_dict[plot_identifier]
+    for name, pdata in plot_dict.items():
+        django_id = pdata.get("properties", {}).get("django_id") or pdata.get("django_id")
+        if str(django_id) == str(plot_identifier):
+            return name, pdata
+
+    fresh = plot_sync_service.get_plots_dict(force_refresh=True)
+    if fresh:
+        _apply_plot_update(fresh)
+    if plot_identifier in plot_dict:
+        return plot_identifier, plot_dict[plot_identifier]
+    for name, pdata in plot_dict.items():
+        django_id = pdata.get("properties", {}).get("django_id") or pdata.get("django_id")
+        if str(django_id) == str(plot_identifier):
+            return name, pdata
+    raise HTTPException(status_code=404, detail="Plot not found (tried instant refresh)")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -944,9 +965,7 @@ def get_required_n_merged(
     plantation_date: Optional[str] = Query(None),
     end_date: str = Query(default=datetime.now().strftime("%Y-%m-%d")),
 ):
-    plot = plot_dict.get(plot_name)
-    if not plot:
-        raise HTTPException(status_code=404, detail="Plot not found")
+    _, plot = _resolve_plot_or_refresh(plot_name)
 
     geometry = plot["geometry"]
     properties = plot.get("properties", {})
@@ -1043,10 +1062,7 @@ def analyze_plot_npk(
     fe_days_back: int = Query(default=30, description="Number of days back to search for Sentinel-1 SAR data")
 ):
     """Analyze both soil parameters (including Fe using Sentinel-1 SAR) and NPK for a specific plot"""
-    if plot_name not in plot_dict:
-        raise HTTPException(status_code=404, detail="Plot not found")
-   
-    plot = plot_dict[plot_name]
+    _, plot = _resolve_plot_or_refresh(plot_name)
     geometry = plot["geometry"]
    
     # Calculate soil statistics (including Fe Index)
@@ -1075,10 +1091,7 @@ def get_npk_analysis(
     plantation_date: str = Query(default=PLANTATION_DATE)
 ):
     """Get only NPK analysis for a specific plot"""
-    if plot_name not in plot_dict:
-        raise HTTPException(status_code=404, detail="Plot not found")
-   
-    plot = plot_dict[plot_name]
+    _, plot = _resolve_plot_or_refresh(plot_name)
     geometry = plot["geometry"]
    
     npk_analysis = calculate_npk_for_plot(geometry, plantation_date)
@@ -1095,10 +1108,7 @@ def get_fe_analysis(
     fe_days_back: int = Query(default=30, description="Number of days back to search for Sentinel-1 SAR data")
 ):
     """Get only Fe Index analysis for a specific plot using Sentinel-1 SAR (current date)"""
-    if plot_name not in plot_dict:
-        raise HTTPException(status_code=404, detail="Plot not found")
-   
-    plot = plot_dict[plot_name]
+    _, plot = _resolve_plot_or_refresh(plot_name)
     geometry = plot["geometry"]
    
     fe_analysis = calculate_fe_index(geometry, fe_days_back)
