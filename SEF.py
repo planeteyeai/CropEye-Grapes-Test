@@ -789,11 +789,25 @@ async def fetch_rainfall(lat: float, lon: float, start: date, end: date):
         "daily": "precipitation_sum",
         "timezone": "auto"
     }
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(url, params=params)
-        resp.raise_for_status()
-        data = resp.json()
-    return data.get("daily", {}).get("precipitation_sum", [])
+    timeout = httpx.Timeout(connect=8.0, read=12.0, write=8.0, pool=8.0)
+    retry_delays = [0.5, 1.0, 2.0]
+
+    for attempt, delay in enumerate(retry_delays, start=1):
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.get(url, params=params)
+                resp.raise_for_status()
+                data = resp.json()
+                values = data.get("daily", {}).get("precipitation_sum", [])
+                return values if isinstance(values, list) else []
+        except (httpx.ConnectTimeout, httpx.ReadTimeout, httpx.NetworkError, httpx.HTTPStatusError) as e:
+            if attempt == len(retry_delays):
+                print(f"Rainfall fetch failed after retries ({lat}, {lon}): {e}")
+                return []
+            await asyncio.sleep(delay)
+        except Exception as e:
+            print(f"Unexpected rainfall fetch error ({lat}, {lon}): {e}")
+            return []
 
 # ============================
 # Main endpoint
