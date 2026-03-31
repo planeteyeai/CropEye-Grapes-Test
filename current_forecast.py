@@ -1,14 +1,41 @@
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 import httpx, uvicorn
 from cachetools import TTLCache
 from fastapi import FastAPI, Query, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 import httpx, uvicorn
 from cachetools import TTLCache
+import asyncio
+from contextlib import asynccontextmanager
+from datetime import datetime
 
 
-app = FastAPI(title="Forecast Weather API")
+_warmup_task = None
+
+async def _warmup_loop(client: httpx.AsyncClient):
+    while True:
+        try:
+            await client.get(BASE_URL, params={"latitude": 18.5, "longitude": 73.8, "daily": "temperature_2m_max", "forecast_days": 1, "timezone": "auto"})
+        except Exception:
+            pass
+        await asyncio.sleep(5)
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _warmup_task
+    app.state.http_client = httpx.AsyncClient(timeout=15.0)
+    _warmup_task = asyncio.create_task(_warmup_loop(app.state.http_client))
+    yield
+    _warmup_task.cancel()
+    try:
+        await _warmup_task
+    except asyncio.CancelledError:
+        pass
+    await app.state.http_client.aclose()
+
+app = FastAPI(title="Forecast Weather API", lifespan=lifespan)
  
 # Allow CORS (for frontend use)
 app.add_middleware(
@@ -18,6 +45,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(GZipMiddleware, minimum_size=256)
  
 # Cache: max 100 entries, TTL = 7200 sec (2 hours)
 cache = TTLCache(maxsize=1000, ttl=7200)
@@ -28,7 +56,7 @@ BASE_URL = "https://api.open-meteo.com/v1/forecast"
 # Forecast Endpoint (Open-Meteo)
 # ------------------------
 @app.get("/forecast")
-async def forecast(lat: float = Query(...), lon: float = Query(...)):
+async def forecast(request: Request, lat: float = Query(...), lon: float = Query(...)):
     cache_key = f"forecast_{lat}_{lon}"
     if cache_key in cache:
         return {"source": "cache", "data": cache[cache_key]}
@@ -42,10 +70,9 @@ async def forecast(lat: float = Query(...), lon: float = Query(...)):
         "forecast_days": 8
     }
  
-    async with httpx.AsyncClient() as client:
-        response = await client.get(BASE_URL, params=params)
-        response.raise_for_status()
-        data = response.json()
+    response = await request.app.state.http_client.get(BASE_URL, params=params)
+    response.raise_for_status()
+    data = response.json()
  
     result = []
     for i in range(len(data["daily"]["time"])):
@@ -96,11 +123,10 @@ async def get_curr_weather(
 
     # Prepare request to WeatherAPI
     params = {"key": API_KEY, "q": q, "aqi": "yes"}
-    async with httpx.AsyncClient(timeout=15) as client:
-        r = await client.get(C_BASE_URL, params=params)
-        if r.status_code != 200:
-            raise HTTPException(502, f"WeatherAPI error: {r.text}")
-        data = r.json()
+    r = await request.app.state.http_client.get(C_BASE_URL, params=params)
+    if r.status_code != 200:
+        raise HTTPException(502, f"WeatherAPI error: {r.text}")
+    data = r.json()
 
     # Handle WeatherAPI errors (like quota exceeded)
     if "error" in data:
@@ -128,6 +154,10 @@ async def get_curr_weather(
     # Save to cache
     cache[q] = response
     return response
+
+@app.get("/health")
+async def health():
+    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
 
 if __name__ == "__main__":
     uvicorn.run("current_forecast:app", host="0.0.0.0", port=8007, reload=False)

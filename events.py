@@ -2,11 +2,14 @@
 # Comprehensive Agriculture Analysis API - Merged Version
 import os
 from shapely import geometry
+import json
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query
 import pandas as pd 
 from cachetools import TTLCache 
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from typing import List, Dict, Any, Optional
 import ee
 from dateutil.relativedelta import relativedelta
@@ -18,7 +21,7 @@ from shapely.geometry import shape, Point, Polygon
 from geopy.distance import geodesic  
 import matplotlib.colors as mcolors
 import numpy as np
-from shared_services import PlotSyncService, _clean_numbers
+from shared_services import PlotSyncService, PlotKeepAliveManager, _clean_numbers
 # from Admin import calculate_area_hectares
  
  
@@ -40,6 +43,7 @@ plot_sync_service = PlotSyncService()
  
 plot_dict = plot_sync_service.get_plots_dict()
 print(f"ðŸš€ events.py startup: Loaded {len(plot_dict)} plots from Django")
+keepalive_manager: Optional[PlotKeepAliveManager] = None
 
 def calculate_area_hectares(geometry):
     """Calculate area in hectares"""
@@ -97,6 +101,20 @@ def get_plot_feature_collection():
     return ee.FeatureCollection(features)
 
 plot_fc = get_plot_feature_collection()
+
+def _apply_plot_update(new_plots: Dict[str, Dict]) -> None:
+    global plot_dict, plot_fc
+    plot_dict = new_plots
+    plot_fc = get_plot_feature_collection()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global keepalive_manager
+    keepalive_manager = PlotKeepAliveManager(plot_sync_service, _apply_plot_update, 3.0, 5.0)
+    await keepalive_manager.refresh_now(force=True)
+    await keepalive_manager.start()
+    yield
+    await keepalive_manager.stop()
 
 def _round_safe(val, digits=4):
     try:
@@ -1130,7 +1148,8 @@ def detect_irrigation_events(
 app = FastAPI(
     title="Comprehensive Agriculture Analysis API",
     description="Complete API for Brix/Recovery/Sugar Yield analysis, vegetation indices, biomass, stress events, and irrigation detection using Earth Engine",
-    version="4.0.0"
+    version="4.0.0",
+    lifespan=lifespan
 )
  
 app.add_middleware(
@@ -1139,6 +1158,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(GZipMiddleware, minimum_size=512)
  
 # -------------------------------
 # API Endpoints
@@ -1194,7 +1214,8 @@ async def health_check():
         "service": "Comprehensive Agriculture Analysis API",
         "data_source": "Django /plots/ API",
         "plot_count": len(plot_dict),
-        "last_sync": plot_sync_service.last_sync.isoformat() if plot_sync_service.last_sync else None
+        "last_sync": plot_sync_service.last_sync.isoformat() if plot_sync_service.last_sync else None,
+        "keepalive": keepalive_manager.status() if keepalive_manager else None
     }
 
 @app.get("/plots/debug")
@@ -3058,16 +3079,21 @@ async def get_sync_status():
         "total_plots": len(plot_dict),
         "plots_with_django_ids": len([p for p in plot_dict.values() if p.get("django_id")]),
         "plots_from_geojson": len([p for p in plot_dict.values() if not p.get("django_id")]),
-        "status": "active"
+        "status": "active",
+        "keepalive": keepalive_manager.status() if keepalive_manager else None
     }
 
 @app.post("/refresh-from-django")
 async def refresh_from_django():
     """Manually refresh all plots from Django - useful after Django restart"""
     try:
-        global plot_dict
+        global plot_dict, plot_fc
         print("ðŸ”„ Manual refresh from Django requested for events.py...")
-        plot_dict = plot_sync_service.get_plots_dict(force_refresh=True)
+        if keepalive_manager:
+            plot_dict = await keepalive_manager.refresh_now(force=True)
+            plot_fc = get_plot_feature_collection()
+        else:
+            plot_dict = plot_sync_service.get_plots_dict(force_refresh=True)
         return {"status": "success", "message": f"Refreshed {len(plot_dict)} plots."}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to refresh from Django: {str(e)}")

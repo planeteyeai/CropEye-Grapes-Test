@@ -1,13 +1,16 @@
 import os
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
 import ee
 import pandas as pd
 from datetime import datetime, timedelta
 import uvicorn
-from shared_services import PlotSyncService, _round_safe, _clean_numbers
+from contextlib import asynccontextmanager
+import json
+from shared_services import PlotSyncService, PlotKeepAliveManager, _round_safe, _clean_numbers
 import numpy as np
 from events import calculate_brix_sugar_stats1,get_brix_recovery_sugar_yield_images
 import hashlib
@@ -29,10 +32,26 @@ _init_earth_engine()
 # FastAPI Setup
 # ------------------------------
 
+keepalive_manager: Optional[PlotKeepAliveManager] = None
+
+def _apply_plot_update(new_plots: Dict[str, Dict]) -> None:
+    global plot_dict
+    plot_dict = new_plots
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global keepalive_manager, plot_dict
+    keepalive_manager = PlotKeepAliveManager(plot_sync_service, _apply_plot_update, 3.0, 5.0)
+    await keepalive_manager.refresh_now(force=True)
+    await keepalive_manager.start()
+    yield
+    await keepalive_manager.stop()
+
 app = FastAPI(
     title="Soil Parameter Analysis API with NPK and SAR-based Fe Analysis",
     description="Analyze various soil parameters per plot from a GeoJSON using Earth Engine with NPK and Sentinel-1 SAR Iron calculations",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 app.add_middleware(
@@ -42,6 +61,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(GZipMiddleware, minimum_size=512)
 
 # ------------------------------
 # Initialize plot sync service
@@ -1113,7 +1133,8 @@ async def health_check():
         "service": "Soil Parameter Analysis API with NPK and SAR-based Fe Analysis",
         "data_source": "Django /plots/ API",
         "plot_count": len(plot_dict),
-        "last_sync": plot_sync_service.last_sync.isoformat() if plot_sync_service.last_sync else None
+        "last_sync": plot_sync_service.last_sync.isoformat() if plot_sync_service.last_sync else None,
+        "keepalive": keepalive_manager.status() if keepalive_manager else None
     }
 
 @app.get("/plots/refresh")
@@ -1121,7 +1142,10 @@ async def refresh_plots():
     """Refresh plots from Django API"""
     try:
         global plot_dict
-        plot_dict = plot_sync_service.get_plots_dict(force_refresh=True)
+        if keepalive_manager:
+            plot_dict = await keepalive_manager.refresh_now(force=True)
+        else:
+            plot_dict = plot_sync_service.get_plots_dict(force_refresh=True)
         return {
             "status": "success",
             "message": f"Successfully refreshed {len(plot_dict)} plots",
@@ -1217,7 +1241,8 @@ async def get_sync_status():
         "plots_with_django_ids": len([p for p in plot_dict.values() if p.get('properties', {}).get('django_id')]),
         "plots_from_api": len(plot_dict),
         "last_sync": plot_sync_service.last_sync.isoformat() if plot_sync_service.last_sync else None,
-        "status": "active"
+        "status": "active",
+        "keepalive": keepalive_manager.status() if keepalive_manager else None
     }
 
 @app.post("/refresh-from-django")
@@ -1228,7 +1253,10 @@ async def refresh_from_django():
         print("ðŸ”„ Manual refresh from Django requested...")
         
         # Force refresh from Django
-        plot_dict = plot_sync_service.get_plots_dict(force_refresh=True)
+        if keepalive_manager:
+            plot_dict = await keepalive_manager.refresh_now(force=True)
+        else:
+            plot_dict = plot_sync_service.get_plots_dict(force_refresh=True)
         
         return {
             "status": "success", 

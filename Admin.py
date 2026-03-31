@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException, Query, Depends
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from typing import List, Dict, Optional, Any, Union
 import ee
@@ -18,7 +19,7 @@ from fastapi import FastAPI, Request
 from pydantic import BaseModel
 from shapely.geometry import shape, Point, Polygon
 from geopy.distance import geodesic
-from shared_services import PlotSyncService
+from shared_services import PlotSyncService, PlotKeepAliveManager
 from events import generate_brix_time_series, compute_brix_image
 
 # Initialize Earth Engine - move this to the top
@@ -160,6 +161,12 @@ indexVisParams = {
 
 # Initialize plot sync service
 plot_sync_service = PlotSyncService()
+keepalive_manager: Optional[PlotKeepAliveManager] = None
+plot_dict: Dict[str, Dict[str, Any]] = {}
+
+def _apply_plot_update(new_plots: Dict[str, Dict[str, Any]]) -> None:
+    global plot_dict
+    plot_dict = new_plots
 
 def get_latest_satellite_update(collection) -> str:
     """Get the latest satellite update date from the collection"""
@@ -196,9 +203,11 @@ def get_tile_url(image, vis_params, name):
 async def lifespan(app: FastAPI):
     # Startup
     try:
-        global plot_dict
+        global plot_dict, keepalive_manager
         print("?? Admin.py: Initializing application and fetching plots from Django API...")
-        plot_dict = plot_sync_service.get_plots_dict(force_refresh=True)
+        keepalive_manager = PlotKeepAliveManager(plot_sync_service, _apply_plot_update, 3.0, 5.0)
+        plot_dict = await keepalive_manager.refresh_now(force=True)
+        await keepalive_manager.start()
         print(f"? Admin.py startup: Loaded {len(plot_dict)} plots from Django")
         print("? Admin.py: Application initialized successfully")
     except Exception as e:
@@ -206,6 +215,8 @@ async def lifespan(app: FastAPI):
         raise
     yield
     # Shutdown
+    if keepalive_manager:
+        await keepalive_manager.stop()
     print("Shutting down FastAPI application")
 
 # Create FastAPI app
@@ -224,6 +235,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(GZipMiddleware, minimum_size=512)
 
 def get_recent_dates():
     """Get list of recent dates for date selection"""
@@ -1919,7 +1931,9 @@ async def health_check():
     """Health check endpoint"""
     return {
         "status": "healthy",
-        "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.now().isoformat(),
+        "plot_count": len(plot_dict),
+        "keepalive": keepalive_manager.status() if keepalive_manager else None
     }
  
 @app.get("/plots/{plot_name}/tiles")
@@ -2083,7 +2097,10 @@ async def refresh_from_django():
         global plot_dict
         print("?? Manual refresh from Django requested...")
         # Force refresh from Django
-        plot_dict = plot_sync_service.get_plots_dict(force_refresh=True)
+        if keepalive_manager:
+            plot_dict = await keepalive_manager.refresh_now(force=True)
+        else:
+            plot_dict = plot_sync_service.get_plots_dict(force_refresh=True)
         return {
             "status": "success", 
             "message": f"Successfully refreshed {len(plot_dict)} plots from Django",

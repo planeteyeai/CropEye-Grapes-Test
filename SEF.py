@@ -1,6 +1,7 @@
 import os
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, validator
 from typing import List, Dict, Optional, Any, Union
@@ -11,7 +12,9 @@ from datetime import date, timedelta, datetime
 import uvicorn
 import httpx
 import math
-from shared_services import PlotSyncService
+import json
+from contextlib import asynccontextmanager
+from shared_services import PlotSyncService, PlotKeepAliveManager
 from fastapi.middleware.cors import CORSMiddleware
 # Initialize Earth Engine
 raw = os.environ["EE_SERVICE_ACCOUNT_JSON"]
@@ -34,6 +37,11 @@ app.add_middleware(
  
 plot_dict = plot_sync_service.get_plots_dict()
 print(f"ðŸš€ events.py startup: Loaded {len(plot_dict)} plots from Django")
+keepalive_manager: Optional[PlotKeepAliveManager] = None
+
+def _apply_plot_update(new_plots: Dict[str, Dict]) -> None:
+    global plot_dict
+    plot_dict = new_plots
 
 def find_plot_by_name(plot_name: str) -> Optional[Dict]:
     """Find plot by name with flexible matching"""
@@ -360,10 +368,20 @@ class VegetationHealthAnalyzer:
             return "Very Poor", "darkred"
  
 # Initialize FastAPI app
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global keepalive_manager
+    keepalive_manager = PlotKeepAliveManager(plot_sync_service, _apply_plot_update, 3.0, 5.0)
+    await keepalive_manager.refresh_now(force=True)
+    await keepalive_manager.start()
+    yield
+    await keepalive_manager.stop()
+
 app = FastAPI(
     title="Sentinel-1 SAR Vegetation Health Analysis API",
     description="API for analyzing vegetation health using Sentinel-1 SAR data",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
  
 # Add CORS middleware
@@ -374,6 +392,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(GZipMiddleware, minimum_size=512)
  
 # Initialize analyzer
 analyzer = VegetationHealthAnalyzer()
@@ -386,6 +405,14 @@ async def root():
         "message": "Sentinel-1 SAR Vegetation Health Analysis API",
         "version": "1.0.0",
         "description": "Analyzes vegetation health using SAR data from Sentinel-1"
+    }
+
+@app.get("/health")
+async def health_check():
+    return {
+        "status": "healthy",
+        "plot_count": len(plot_dict),
+        "keepalive": keepalive_manager.status() if keepalive_manager else None
     }
  
  
@@ -833,7 +860,10 @@ async def refresh_from_django():
         global plot_dict
         print("?? Manual refresh from Django requested...")
         # Force refresh from Django
-        plot_dict = plot_sync_service.get_plots_dict(force_refresh=True)
+        if keepalive_manager:
+            plot_dict = await keepalive_manager.refresh_now(force=True)
+        else:
+            plot_dict = plot_sync_service.get_plots_dict(force_refresh=True)
         return {
             "status": "success", 
             "message": f"Successfully refreshed {len(plot_dict)} plots from Django",

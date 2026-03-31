@@ -1,10 +1,13 @@
-from typing import Dict, Any
+from typing import Dict, Any, Callable, Optional, Awaitable
 import requests
 import time
 from datetime import datetime
 import ee
 import numpy as np
 import math
+import asyncio
+import random
+import threading
 
 # -----------------------------
 # Helpers: safe rounding & JSON sanitization=
@@ -72,7 +75,17 @@ class PlotSyncService:
         self.django_api_url = django_api_url
         self.plots_cache = {}
         self.last_sync = None
-        self.cache_duration = 60  # 1 minute cache - keeps plots in sync with Django
+        # Keep cache short so apps can refresh every 3-5 seconds safely.
+        self.cache_duration = 4
+        self._cache_lock = threading.Lock()
+        self._session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(pool_connections=200, pool_maxsize=200, max_retries=2)
+        self._session.mount("http://", adapter)
+        self._session.mount("https://", adapter)
+        self.last_error: Optional[str] = None
+        self.last_successful_sync: Optional[datetime] = None
+        self.refresh_attempts = 0
+        self.refresh_successes = 0
 
     def fetch_plots_from_api(self) -> Dict[str, Any]:
         """Fetch all plots from Django API with retries (Django on Render may cold-start)"""
@@ -82,7 +95,7 @@ class PlotSyncService:
 
         for attempt in range(max_retries):
             try:
-                response = requests.get(
+                response = self._session.get(
                     f"{self.django_api_url}/api/plots/public/",
                     headers={'Content-Type': 'application/json'},
                     timeout=timeout
@@ -199,16 +212,108 @@ class PlotSyncService:
     def get_plots_dict(self, force_refresh: bool = False) -> Dict[str, Dict]:
         """Get plots dictionary, with caching"""
         current_time = datetime.now()
+        with self._cache_lock:
+            if (
+                not force_refresh and
+                self.last_sync and
+                (current_time - self.last_sync).total_seconds() < self.cache_duration and
+                self.plots_cache
+            ):
+                return self.plots_cache
 
-        if (
-            not force_refresh and
-            self.last_sync and
-            (current_time - self.last_sync).seconds < self.cache_duration and
-            self.plots_cache
-        ):
+            self.refresh_attempts += 1
+            plots_data = self.fetch_plots_from_api()
+            if plots_data:
+                self.plots_cache = plots_data
+                self.last_sync = current_time
+                self.last_successful_sync = current_time
+                self.last_error = None
+                self.refresh_successes += 1
+            else:
+                self.last_error = "Empty or failed sync from Django API"
             return self.plots_cache
 
-        plots_data = self.fetch_plots_from_api()
-        self.plots_cache = plots_data
-        self.last_sync = current_time
-        return plots_data
+    def health_ping(self) -> bool:
+        """Cheap keep-alive ping to reduce Django cold-start chance."""
+        try:
+            resp = self._session.get(
+                f"{self.django_api_url}/api/plots/public/?page_size=1",
+                timeout=10
+            )
+            return resp.status_code == 200
+        except Exception:
+            return False
+
+    def get_refresh_stats(self) -> Dict[str, Any]:
+        return {
+            "last_sync": self.last_sync.isoformat() if self.last_sync else None,
+            "last_successful_sync": self.last_successful_sync.isoformat() if self.last_successful_sync else None,
+            "last_error": self.last_error,
+            "refresh_attempts": self.refresh_attempts,
+            "refresh_successes": self.refresh_successes,
+            "cache_duration_seconds": self.cache_duration,
+            "cached_plots": len(self.plots_cache),
+        }
+
+
+class PlotKeepAliveManager:
+    """Background refresh loop for high-availability plot sync."""
+
+    def __init__(
+        self,
+        plot_service: PlotSyncService,
+        apply_callback: Callable[[Dict[str, Dict]], Optional[Awaitable[None]]],
+        min_interval_seconds: float = 3.0,
+        max_interval_seconds: float = 5.0,
+    ):
+        self.plot_service = plot_service
+        self.apply_callback = apply_callback
+        self.min_interval_seconds = min_interval_seconds
+        self.max_interval_seconds = max_interval_seconds
+        self._task: Optional[asyncio.Task] = None
+        self._running = False
+        self._last_cycle: Optional[datetime] = None
+
+    async def _apply(self, plots: Dict[str, Dict]) -> None:
+        maybe = self.apply_callback(plots)
+        if asyncio.iscoroutine(maybe):
+            await maybe
+
+    async def refresh_now(self, force: bool = True) -> Dict[str, Dict]:
+        plots = await asyncio.to_thread(self.plot_service.get_plots_dict, force)
+        if plots:
+            await self._apply(plots)
+        self._last_cycle = datetime.now()
+        return plots
+
+    async def _loop(self) -> None:
+        while self._running:
+            try:
+                await asyncio.to_thread(self.plot_service.health_ping)
+                await self.refresh_now(force=True)
+            except Exception as e:
+                self.plot_service.last_error = str(e)
+            await asyncio.sleep(random.uniform(self.min_interval_seconds, self.max_interval_seconds))
+
+    async def start(self) -> None:
+        if self._task and not self._task.done():
+            return
+        self._running = True
+        self._task = asyncio.create_task(self._loop())
+
+    async def stop(self) -> None:
+        self._running = False
+        if self._task and not self._task.done():
+            self._task.cancel()
+            try:
+                await self._task
+            except asyncio.CancelledError:
+                pass
+
+    def status(self) -> Dict[str, Any]:
+        return {
+            "running": bool(self._task and not self._task.done()),
+            "last_cycle": self._last_cycle.isoformat() if self._last_cycle else None,
+            "interval_seconds": [self.min_interval_seconds, self.max_interval_seconds],
+            "plot_sync": self.plot_service.get_refresh_stats(),
+        }
