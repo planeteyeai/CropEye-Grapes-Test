@@ -1656,12 +1656,11 @@ async def pest_detection_by_crop(
  
 
 
-@app.post("/grapes/canopy-vigour1", response_model=Dict[str, Any])
-def grapes_canopy_vigour(
-    plot_name: str,
-    start_date: str | None = Query(None),
-    end_date: str | None = Query(None),
-):
+# =========================
+# ✅ LOGIC FUNCTION
+# =========================
+
+def _grapes_canopy_vigour_logic(plot_name, start_date=None, end_date=None):
 
     _, plot_data = _resolve_plot_or_refresh(plot_name)
 
@@ -1696,7 +1695,7 @@ def grapes_canopy_vigour(
     s2 = s2_col.median().clip(geometry)
 
     # ------------------------------------------------------------------
-    # NDVI (UNCHANGED)
+    # NDVI
     # ------------------------------------------------------------------
     ndvi = (
         s2.select("B8")
@@ -1718,7 +1717,7 @@ def grapes_canopy_vigour(
     ndvi_mean = ee.Number(ndvi_mean).getInfo() if ndvi_mean else None
 
     # ------------------------------------------------------------------
-    # Vigour Classification (UNCHANGED)
+    # Vigour Classification
     # ------------------------------------------------------------------
     vigour_class_img = (
         ee.Image(0)
@@ -1740,16 +1739,12 @@ def grapes_canopy_vigour(
     tile_url = vigour_class_img.getMapId(
         vigour_vis)["tile_fetcher"].url_format
 
-
     smoothed_class = vigour_class_img.focal_mean(radius=5, units="meters")
-
     smoothed_vis = smoothed_class.visualize(**vigour_vis).clip(geometry)
-
     tile_url = smoothed_vis.getMapId()["tile_fetcher"].url_format
 
-
     # =====================================================
-    # ✅ PIXEL COORDINATES EXTRACTION
+    # PIXEL COORDINATES
     # =====================================================
 
     pixel_lonlat = ee.Image.pixelLonLat()
@@ -1758,12 +1753,7 @@ def grapes_canopy_vigour(
         try:
             coords = (
                 pixel_lonlat.updateMask(mask)
-                .sample(
-                    region=geometry,
-                    scale=10,
-                    geometries=True,
-                    numPixels=5000
-                )
+                .sample(region=geometry, scale=10, geometries=True, numPixels=5000)
                 .geometry()
                 .coordinates()
                 .getInfo()
@@ -1786,10 +1776,7 @@ def grapes_canopy_vigour(
     def safe_count(mask):
         try:
             value = one.updateMask(mask).reduceRegion(
-                ee.Reducer.count(),
-                geometry,
-                10,
-                bestEffort=True
+                ee.Reducer.count(), geometry, 10, bestEffort=True
             ).get("constant")
             return int(value.getInfo() or 0)
         except:
@@ -1803,7 +1790,19 @@ def grapes_canopy_vigour(
     excellent_count = safe_count(vigour_class_img.eq(4))
 
     # =====================================================
-    # FEATURE RESPONSE (SIMILAR FORMAT)
+    # PIXEL PERCENTAGES
+    # =====================================================
+
+    def percentage(count, total):
+        return round((count / total) * 100, 2) if total > 0 else 0
+
+    poor_pct = percentage(poor_count, total_pixel_count)
+    moderate_pct = percentage(moderate_count, total_pixel_count)
+    good_pct = percentage(good_count, total_pixel_count)
+    excellent_pct = percentage(excellent_count, total_pixel_count)
+
+    # =====================================================
+    # RESPONSE
     # =====================================================
 
     feature = {
@@ -1831,19 +1830,35 @@ def grapes_canopy_vigour(
             "total_pixel_count": total_pixel_count,
 
             "poor_vigour_pixel_count": poor_count,
+            "poor_vigour_percentage": poor_pct,
             "poor_vigour_coordinates": poor_coords,
 
             "moderate_vigour_pixel_count": moderate_count,
+            "moderate_vigour_percentage": moderate_pct,
             "moderate_vigour_coordinates": moderate_coords,
 
             "good_vigour_pixel_count": good_count,
+            "good_vigour_percentage": good_pct,
             "good_vigour_coordinates": good_coords,
 
             "excellent_vigour_pixel_count": excellent_count,
+            "excellent_vigour_percentage": excellent_pct,
             "excellent_vigour_coordinates": excellent_coords,
         },
     }
 
+
+# =========================
+# ✅ FIXED ENDPOINT
+# =========================
+
+@app.post("/grapes/canopy-vigour1", response_model=Dict[str, Any])
+def grapes_canopy_vigour(
+    plot_name: str,
+    start_date: str | None = Query(None),
+    end_date: str | None = Query(None),
+):
+    return _grapes_canopy_vigour_logic(plot_name, start_date, end_date)
 
 @app.post("/grapes/brix-grid-values", response_model=Dict[str, Any])
 async def grapes_brix_grid_values(

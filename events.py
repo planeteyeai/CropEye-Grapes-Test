@@ -635,6 +635,7 @@ class PlotStatsResponse(BaseModel):
     plantation_type: Optional[str] = None
     eligibility_status:Optional[str]=None
     crop_type: Optional[str] = None
+
 # Brix, Recovery, and Sugar Yield Calculation Functions
 # -------------------------------
  
@@ -2054,7 +2055,7 @@ def compute_brix_image(start_date, end_date, geometry):
 
 
 def generate_brix_time_series(geometry, pruning_date):
-
+    from Admin import _grapes_canopy_vigour_logic
     pruning_date = ee.Date(pruning_date)
 
     start_date = pruning_date.advance(80, "day")
@@ -2186,6 +2187,9 @@ def grapes_brix_time_series(plot_name: str):
         },
         "last_updated": datetime.utcnow().isoformat()
     }
+
+
+
 ######-----------------End of Grapes Endpoint-----------#####
 
 
