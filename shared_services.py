@@ -126,7 +126,9 @@ class PlotSyncService:
         """Process the Django API response and convert to plot dictionary format"""
         plot_dict = {}
 
-        for plot in plots_data.get('results', []):
+        plots_list = plots_data.get('results') if isinstance(plots_data, dict) else plots_data
+
+        for plot in plots_list or []:
             plot_id = plot.get('id')
             gat_number = plot.get('gat_number', '')
             plot_number = plot.get('plot_number', '')
