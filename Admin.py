@@ -1653,155 +1653,133 @@ async def pest_detection_by_crop(
         raise HTTPException(status_code=404, detail="No satellite data available")
 
     return result
- # -----------------------------
-# Load CSV properly (FIXED)
+# -----------------------------
+# Load CSV properly
 # -----------------------------
 def load_csv_fixed(path):
+    df_raw = pd.read_csv(path, encoding="latin-1", engine="python", header=None)
 
-    # Read raw without header
-    df_raw = pd.read_csv(
-        path,
-        encoding="latin-1",
-        engine="python",
-        header=None
-    )
-
-    # Find header row (the row which contains 'day' or 'stage')
     header_row_index = None
-
     for i, row in df_raw.iterrows():
         row_str = " ".join([str(x).lower() for x in row.values])
 
-        if "day" in row_str and "stage" in row_str:
+        if "stage" in row_str:
             header_row_index = i
             break
 
     if header_row_index is None:
-        raise Exception("Could not detect header row in CSV")
+        raise Exception("Header not found")
 
-    # Reload with correct header
-    df = pd.read_csv(
+    return pd.read_csv(
         path,
         encoding="latin-1",
         engine="python",
         header=header_row_index
     )
 
-    return df
-
 
 df = load_csv_fixed("Grapes_Schedule.csv")
 
 # Clean columns
 df.columns = (
-    df.columns
-    .astype(str)
+    df.columns.astype(str)
     .str.strip()
     .str.replace("\n", " ", regex=False)
-    .str.replace("  ", " ", regex=False)
 )
 
-print("✅ Fixed Columns:", df.columns.tolist())
-
-# -----------------------------
-# Detect columns safely
-# -----------------------------
-day_col = next((c for c in df.columns if "day" in c.lower()), None)
+# Detect columns
 stage_col = next((c for c in df.columns if "stage" in c.lower()), "")
 issue_col = next((c for c in df.columns if "disease" in c.lower()), "")
 rec_col = next((c for c in df.columns if "management" in c.lower()), "")
 org_col = next((c for c in df.columns if "organic" in c.lower()), "")
 nut_col = next((c for c in df.columns if "nutrient" in c.lower()), "")
 
-if not day_col:
-    raise Exception("Still no DAY column found after fixing CSV")
-
-# -----------------------------
-# Helpers
-# -----------------------------
-def parse_day(value):
-    if isinstance(value, str) and "day" in value.lower():
-        try:
-            return int(value.lower().replace("day", "").strip())
-        except:
-            return None
-    elif isinstance(value, (int, float)):
-        return int(value)
-    return None
-
-
-df["day_number"] = df[day_col].apply(parse_day)
-
 df = df.fillna("")
 
-# -----------------------------
-# Core Logic (ONLY FRUIT)
-# -----------------------------
-def generate_schedule(fruit_date: Optional[str]) -> List[Dict[str, Any]]:
+# ============================================================
+# CORE LOGIC
+# ============================================================
 
-    if not fruit_date:
-        return []
+def generate_schedule(foundation_date: str) -> List[Dict[str, Any]]:
 
     result = []
 
     today = datetime.today().date()
     end_date = today + timedelta(days=7)
 
-    base_date = datetime.fromisoformat(fruit_date).date()
+    foundation_base = datetime.fromisoformat(foundation_date).date()
 
+    # Fruit pruning = foundation + 214 days
+    fruit_base = foundation_base + timedelta(days=214)
+
+    foundation_started = True
     fruit_started = False
-    day_counter = 0
+
+    foundation_day = 0
+    fruit_day = 0
 
     for _, row in df.iterrows():
 
         stage_text = str(row.get(stage_col, "")).lower()
 
-        # Detect fruit section start
+        # Detect fruit pruning section
         if "fruit" in stage_text:
             fruit_started = True
-            day_counter = 0
+            foundation_started = False
+            fruit_day = 0
             continue
 
-        if not fruit_started:
+        # -------------------------
+        # FOUNDATION PHASE
+        # -------------------------
+        if foundation_started:
+            foundation_day += 1
+            actual_date = foundation_base + timedelta(days=foundation_day - 1)
+            phase = "foundation"
+            day = foundation_day
+
+        # -------------------------
+        # FRUIT PHASE
+        # -------------------------
+        elif fruit_started:
+            fruit_day += 1
+            actual_date = fruit_base + timedelta(days=fruit_day - 1)
+            phase = "fruit"
+            day = fruit_day
+
+        else:
             continue
 
-        # Increment day manually
-        day_counter += 1
-
-        actual_date = base_date + timedelta(days=day_counter - 1)
-
+        # Filter today → next 7 days
         if today <= actual_date <= end_date:
             result.append({
                 "date": actual_date.isoformat(),
-                "day": day_counter,
+                "day": day,
                 "stage": row.get(stage_col, ""),
                 "issue": row.get(issue_col, ""),
                 "recommendation": row.get(rec_col, ""),
                 "organic": row.get(org_col, ""),
                 "nutrient": row.get(nut_col, ""),
-                "type": "fruit"
+                "type": phase
             })
 
     result.sort(key=lambda x: x["date"])
-
     return result
+
 
 # -----------------------------
 # Today Task
 # -----------------------------
-def get_today_task(schedule: List[Dict]) -> Optional[Dict]:
+def get_today_task(schedule):
     today_str = datetime.today().date().isoformat()
-    for item in schedule:
-        if item["date"] == today_str:
-            return item
-    return None
+    return next((x for x in schedule if x["date"] == today_str), None)
 
 
 # ============================================================
-# API ENDPOINT
+# API
 # ============================================================
 @app.get("/grapes-schedule/{plot_name}")
-async def get_grapes_schedule(plot_name: str) -> Dict[str, Any]:
+async def get_grapes_schedule(plot_name: str):
 
     plots = plot_service.get_plots_dict()
 
@@ -1810,19 +1788,20 @@ async def get_grapes_schedule(plot_name: str) -> Dict[str, Any]:
 
     plot = plots[plot_name]["properties"]
 
-    fruit_date = plot.get("fruit_pruning_date")
+    foundation_date = plot.get("foundation_pruning_date")
 
-    if not fruit_date:
-        return {"error": "No fruit pruning date available"}
+    if not foundation_date:
+        return {"error": "No foundation pruning date"}
 
-    schedule = generate_schedule(fruit_date)
-
-    today_task = get_today_task(schedule)
+    schedule = generate_schedule(foundation_date)
 
     return {
         "plot": plot_name,
-        "fruit_pruning_date": fruit_date,
-        "today": today_task,
+        "foundation_pruning_date": foundation_date,
+        "fruit_pruning_date": (
+            datetime.fromisoformat(foundation_date).date() + timedelta(days=214)
+        ).isoformat(),
+        "today": get_today_task(schedule),
         "next_7_days": schedule
     }
 # ============================================================
