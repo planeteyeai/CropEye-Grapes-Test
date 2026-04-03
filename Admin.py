@@ -1805,36 +1805,27 @@ async def get_grapes_schedule(plot_name: str):
         "next_7_days": schedule
     }
 # ============================================================
-# Risk Assessment (Pest + Disease + Weeds)
+# Risk Assessment Engine (FINAL CORRECT)
 # ============================================================
 
-PEST_DISEASE_RULES = [
 
-    # ================= DISEASES =================
+PEST_DISEASE_RULES = [
     {"name": "Downy mildew", "type": "disease", "category": "fungi", "stage_range": (20, 80), "months": ["aug","sep","oct","nov","dec","jan"]},
     {"name": "Powdery mildew", "type": "disease", "category": "fungi", "stage_range": (30, 90), "months": ["oct","nov","dec","jan"]},
     {"name": "Anthracnose", "type": "disease", "category": "fungi", "stage_range": (15, 50), "months": ["sep","oct"]},
 
-    # ================= CHEWING =================
     {"name": "Flea beetle", "type": "pest", "category": "chewing", "stage_range": (10, 30), "months": ["sep","oct"]},
     {"name": "Leaf roller", "type": "pest", "category": "chewing", "stage_range": (20, 45), "months": ["oct","nov"]},
     {"name": "Sphingid caterpillar", "type": "pest", "category": "chewing", "stage_range": (15, 40), "months": ["jul","aug","sep"]},
     {"name": "Stem girdler", "type": "pest", "category": "chewing", "stage_range": (30, 70), "months": ["aug","sep","oct","nov"]},
 
-    # ================= SUCKING =================
     {"name": "Mealybug", "type": "pest", "category": "sucking", "stage_range": (65, 120), "months": ["dec","jan","feb","mar","apr"]},
     {"name": "Thrips", "type": "pest", "category": "sucking", "stage_range": (30, 70), "months": ["oct","nov","dec","jan"]},
     {"name": "Fruit sucking moth", "type": "pest", "category": "sucking", "stage_range": (90, 130), "months": ["dec","jan","feb","mar","apr"]},
 
-    # ================= SOIL =================
     {"name": "Grub", "type": "pest", "category": "soilborne", "stage_range": (45, 80), "months": ["jun","jul","aug","sep"]},
     {"name": "Fusarium wilt", "type": "disease", "category": "soilborne", "stage_range": (20, 75), "months": ["oct","nov","dec","jan","feb"]},
 ]
-
-
-# ============================================================
-# WEED RULES (MONTH BASED ONLY)
-# ============================================================
 
 WEED_RULES = [
     {"name": "Congress Grass (Gajar Gavat)", "months": ["feb","mar","apr","may","jun","jul","aug","sep","oct"]},
@@ -1846,20 +1837,36 @@ WEED_RULES = [
 
 
 # ============================================================
+# HELPER: GET EFFECTIVE DAYS (CRITICAL FIX)
+# ============================================================
+
+def get_effective_days(plot_data):
+    props = plot_data.get("properties", {})
+
+    # Prefer fruit pruning date (cycle reset)
+    date_str = (
+        props.get("fruit_pruning_date")
+        or props.get("foundation_pruning_date")
+        or props.get("plantation_date")
+    )
+
+    if not date_str:
+        return 0
+
+    dt = datetime.strptime(date_str, "%Y-%m-%d")
+    days = (datetime.utcnow() - dt).days
+
+    # Clamp to crop cycle max (important)
+    return min(days, 130)
+
+
+# ============================================================
 # MAIN RISK ENGINE
 # ============================================================
 
 def calculate_risk(plot_data, pixel_data):
 
-    plantation_date = plot_data["properties"].get("plantation_date")
-
-    if not plantation_date:
-        return {}
-
-    # Days since plantation
-    plantation_dt = datetime.strptime(plantation_date, "%Y-%m-%d")
-    days = (datetime.utcnow() - plantation_dt).days
-
+    days = get_effective_days(plot_data)
     current_month = datetime.utcnow().strftime("%b").lower()
 
     result = {
@@ -1868,39 +1875,28 @@ def calculate_risk(plot_data, pixel_data):
         "weeds": {"High": [], "Moderate": [], "Low": []},
     }
 
-    # =====================================================
-    # PEST + DISEASE
-    # =====================================================
+    # ================= PEST + DISEASE =================
 
     for rule in PEST_DISEASE_RULES:
 
         stage_match = rule["stage_range"][0] <= days <= rule["stage_range"][1]
         month_match = current_month in rule["months"]
-
         pixel_value = pixel_data.get(rule["category"], 0)
 
-        # 🔴 HIGH
         if pixel_value > 0 and stage_match and month_match:
             result[f"{rule['type']}s"]["High"].append(rule["name"])
 
-        # 🟠 MODERATE
         elif stage_match and month_match:
             result[f"{rule['type']}s"]["Moderate"].append(rule["name"])
 
-        # 🟢 LOW
         elif month_match:
             result[f"{rule['type']}s"]["Low"].append(rule["name"])
 
-    # =====================================================
-    # WEEDS (MONTH ONLY LOGIC)
-    # =====================================================
+    # ================= WEEDS =================
 
     for weed in WEED_RULES:
-
         if current_month in weed["months"]:
-            # mimic frontend behavior:
             result["weeds"]["High"].append(weed["name"])
-
         else:
             result["weeds"]["Low"].append(weed["name"])
 
@@ -1914,13 +1910,11 @@ def calculate_risk(plot_data, pixel_data):
 @app.get("/risk-assessment")
 async def risk_assessment(plot_name: str):
 
-    # 1. Resolve plot
     resolved_name, plot_data = _resolve_plot_or_refresh(plot_name)
 
     if not plot_data:
         raise HTTPException(status_code=404, detail="Plot not found")
 
-    # 2. Run satellite detection
     pest_detection = run_pest_detection_analysis_by_plot(
         plot_name=resolved_name,
         plot_data=plot_data,
@@ -1933,7 +1927,6 @@ async def risk_assessment(plot_name: str):
 
     px = pest_detection["pixel_summary"]
 
-    # ✅ FIXED KEYS (IMPORTANT)
     pixel_data = {
         "fungi": px.get("fungi_affected_pixel_percentage", 0),
         "chewing": px.get("chewing_affected_pixel_percentage", 0),
@@ -1941,7 +1934,6 @@ async def risk_assessment(plot_name: str):
         "soilborne": px.get("SoilBorn_affected_pixel_percentage", 0),
     }
 
-    # 3. Calculate risk
     risk = calculate_risk(plot_data, pixel_data)
 
     return {
