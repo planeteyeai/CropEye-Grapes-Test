@@ -1830,6 +1830,13 @@ async def get_all_stats(
     return combined_stats
 
 
+from fastapi import FastAPI
+from typing import Dict, Any
+from datetime import datetime, timedelta
+import ee
+
+app = FastAPI()
+
 @app.post("/grapes/ripening-stage", response_model=Dict[str, Any])
 def grapes_ripening_stage(
     plot_name: str,
@@ -1925,6 +1932,22 @@ def grapes_ripening_stage(
         except:
             return None
 
+    # ---------------- EXTRACT DATES ----------------
+    ndre_peak_date = safe_get(ndre_peak)
+    ripening_start_date = safe_get(ripening)
+    harvest_ready_start_date = safe_get(harvest_start)
+    harvest_ready_end_date = safe_get(harvest_end)
+
+    # ---------------- CROP STATUS (NEW LOGIC) ----------------
+    crop_status = None
+
+    if ripening_start_date and harvest_ready_start_date:
+        crop_status = "Ripening"
+    elif ripening_start_date:
+        crop_status = "Growing"
+    elif harvest_ready_start_date and not ripening_start_date:
+        crop_status = "Harvested"
+
     # ---------------- FEATURE ----------------
     feature = {
         "type": "Feature",
@@ -1943,14 +1966,14 @@ def grapes_ripening_stage(
         "type": "FeatureCollection",
         "features": [feature],
         "ripening_analysis": {
-            "ndre_peak_date": safe_get(ndre_peak),
-            "ripening_start_date": safe_get(ripening),
-            "harvest_ready_start_date": safe_get(harvest_start),
-            "harvest_ready_end_date": safe_get(harvest_end),
+            "ndre_peak_date": ndre_peak_date,
+            "ripening_start_date": ripening_start_date,
+            "harvest_ready_start_date": harvest_ready_start_date,
+            "harvest_ready_end_date": harvest_ready_end_date,
+            "crop_status": crop_status,  # ✅ added here
         },
         "last_updated": datetime.utcnow().isoformat(),
     }
-
 
 @app.post("/grapes/yield-estimation")
 def grapes_yield_estimation(
