@@ -1655,9 +1655,16 @@ async def pest_detection_by_crop(
     return result
  
 # ============================================================
-# GRAPES Fertilizer SCHEDULE LOGIC
+# GRAPES SCHEDULE LOGIC (ONLY FRUIT PHASE - CLEAN VERSION)
 # ============================================================
-# Load CSV once at startup
+
+import pandas as pd
+from datetime import datetime, timedelta
+from typing import Optional, List, Dict, Any
+
+# -----------------------------
+# Load CSV safely
+# -----------------------------
 def load_csv_safely(path):
     try:
         return pd.read_csv(path, encoding="utf-8")
@@ -1676,117 +1683,108 @@ def load_csv_safely(path):
 
 df = load_csv_safely("Grapes_Schedule.csv")
 
+# Clean column names
+df.columns = (
+    df.columns
+    .str.strip()
+    .str.replace("\n", " ", regex=False)
+    .str.replace("  ", " ", regex=False)
+)
+
+print("CSV Columns:", df.columns.tolist())  # DEBUG (remove later)
+
+# -----------------------------
+# Detect correct DAY column
+# -----------------------------
+day_col = next(
+    (col for col in df.columns if "day" in col.lower()),
+    None
+)
+
+if not day_col:
+    raise Exception("No DAY column found in CSV")
+
 # -----------------------------
 # Helpers
 # -----------------------------
-
 def parse_day(value):
     if isinstance(value, str) and "DAY" in value.upper():
         try:
             return int(value.upper().replace("DAY", "").strip())
         except:
             return None
+    elif isinstance(value, (int, float)):
+        return int(value)
     return None
 
 
-df["day_number"] = df["Days after pruning or growth stage"].apply(parse_day)
+df["day_number"] = df[day_col].apply(parse_day)
 
-# Clean NaN
+# Fill NaN
 df = df.fillna("")
 
-# -----------------------------
-# Detect phases
-# -----------------------------
-def is_foundation_row(row):
-    # Before fruit pruning section
-    return "foundation" in str(row["crop stages"]).lower() or row["day_number"] is not None
-
-def is_fruit_row(row):
-    return "fruit" in str(row["crop stages"]).lower() or "Day" in str(row["Days after pruning or growth stage"])
-
+# Detect useful columns safely
+stage_col = next((c for c in df.columns if "stage" in c.lower()), "")
+issue_col = next((c for c in df.columns if "disease" in c.lower()), "")
+rec_col = next((c for c in df.columns if "management" in c.lower()), "")
+org_col = next((c for c in df.columns if "organic" in c.lower()), "")
+nut_col = next((c for c in df.columns if "nutrient" in c.lower()), "")
 
 # -----------------------------
-# Core Logic
+# Core Logic (ONLY FRUIT)
 # -----------------------------
+def generate_schedule(fruit_date: Optional[str]) -> List[Dict[str, Any]]:
 
-def generate_schedule(
-    foundation_date: Optional[str],
-    fruit_date: Optional[str]
-) -> List[Dict[str, Any]]:
+    if not fruit_date:
+        return []
 
     result = []
 
     today = datetime.today().date()
     end_date = today + timedelta(days=7)
 
-    # -------------------------
-    # FOUNDATION PHASE
-    # -------------------------
-    if foundation_date:
-        base_date = datetime.fromisoformat(foundation_date).date()
+    base_date = datetime.fromisoformat(fruit_date).date()
 
-        for _, row in df.iterrows():
-            day = row["day_number"]
+    fruit_started = False
 
-            if not day:
-                continue
+    for _, row in df.iterrows():
 
-            actual_date = base_date + timedelta(days=day - 1)
+        stage_text = str(row.get(stage_col, "")).lower()
 
-            if today <= actual_date <= end_date:
-                result.append({
-                    "date": actual_date.isoformat(),
-                    "day": day,
-                    "stage": row.get("crop stages", ""),
-                    "issue": row.get("Diseases/ Pest /canopy/Nutrints/water/PGR", ""),
-                    "recommendation": row.get("Management Practices & Application", ""),
-                    "organic": row.get("Organic Practices & Application", ""),
-                    "nutrient": row.get("NUTRIENT DOSE", ""),
-                    "type": "foundation"
-                })
+        # Detect fruit section start
+        if "fruit" in stage_text:
+            fruit_started = True
 
-    # -------------------------
-    # FRUIT PHASE
-    # -------------------------
-    if fruit_date:
-        base_date = datetime.fromisoformat(fruit_date).date()
+        if not fruit_started:
+            continue
 
-        fruit_started = False
+        day = row.get("day_number")
 
-        for _, row in df.iterrows():
+        if not day:
+            continue
 
-            # Detect start of fruit section
-            if "fruit prunning" in str(row["crop stages"]).lower():
-                fruit_started = True
+        actual_date = base_date + timedelta(days=day - 1)
 
-            if not fruit_started:
-                continue
+        if today <= actual_date <= end_date:
+            result.append({
+                "date": actual_date.isoformat(),
+                "day": day,
+                "stage": row.get(stage_col, ""),
+                "issue": row.get(issue_col, ""),
+                "recommendation": row.get(rec_col, ""),
+                "organic": row.get(org_col, ""),
+                "nutrient": row.get(nut_col, ""),
+                "type": "fruit"
+            })
 
-            day = parse_day(row["Days after pruning or growth stage"])
-
-            if not day:
-                continue
-
-            actual_date = base_date + timedelta(days=day - 1)
-
-            if today <= actual_date <= end_date:
-                result.append({
-                    "date": actual_date.isoformat(),
-                    "day": day,
-                    "stage": row.get("crop stages", ""),
-                    "issue": row.get("Diseases/ Pest /canopy/Nutrints/water/PGR", ""),
-                    "recommendation": row.get("Management Practices & Application", ""),
-                    "organic": row.get("Organic Practices & Application", ""),
-                    "nutrient": row.get("NUTRIENT DOSE", ""),
-                    "type": "fruit"
-                })
-
-    # Sort by date
     result.sort(key=lambda x: x["date"])
 
     return result
 
 
+# -----------------------------
+# Today Task
+# -----------------------------
 def get_today_task(schedule: List[Dict]) -> Optional[Dict]:
     today_str = datetime.today().date().isoformat()
     for item in schedule:
@@ -1794,6 +1792,10 @@ def get_today_task(schedule: List[Dict]) -> Optional[Dict]:
             return item
     return None
 
+
+# ============================================================
+# API ENDPOINT
+# ============================================================
 @app.get("/grapes-schedule/{plot_name}")
 async def get_grapes_schedule(plot_name: str) -> Dict[str, Any]:
 
@@ -1804,27 +1806,21 @@ async def get_grapes_schedule(plot_name: str) -> Dict[str, Any]:
 
     plot = plots[plot_name]["properties"]
 
-    foundation_date = plot.get("foundation_pruning_date")
     fruit_date = plot.get("fruit_pruning_date")
 
-    if not foundation_date and not fruit_date:
-        return {"error": "No pruning dates available"}
+    if not fruit_date:
+        return {"error": "No fruit pruning date available"}
 
-    schedule = generate_schedule(
-        foundation_date=foundation_date,
-        fruit_date=fruit_date
-    )
+    schedule = generate_schedule(fruit_date=fruit_date)
 
     today_task = get_today_task(schedule)
 
     return {
         "plot": plot_name,
-        "foundation_pruning_date": foundation_date,
         "fruit_pruning_date": fruit_date,
         "today": today_task,
         "next_7_days": schedule
     }
-
 # ============================================================
 # Risk Assessment (Pest + Disease + Weeds)
 # ============================================================
