@@ -1658,7 +1658,23 @@ async def pest_detection_by_crop(
 # GRAPES Fertilizer SCHEDULE LOGIC
 # ============================================================
 # Load CSV once at startup
-df = pd.read_csv("Grapes_Schedule.csv", encoding="utf-8")
+def load_csv_safely(path):
+    try:
+        return pd.read_csv(path, encoding="utf-8")
+    except:
+        try:
+            return pd.read_csv(
+                path,
+                encoding="latin-1",
+                engine="python",
+                on_bad_lines="skip"
+            )
+        except:
+            with open(path, "r", errors="ignore") as f:
+                return pd.read_csv(f, engine="python")
+
+
+df = load_csv_safely("Grapes_Schedule.csv")
 
 # -----------------------------
 # Helpers
