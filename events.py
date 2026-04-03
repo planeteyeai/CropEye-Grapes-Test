@@ -1829,14 +1829,6 @@ async def get_all_stats(
     agrostats_cache[cache_key] = combined_stats
     return combined_stats
 
-
-from fastapi import FastAPI
-from typing import Dict, Any
-from datetime import datetime, timedelta
-import ee
-
-app = FastAPI()
-
 @app.post("/grapes/ripening-stage", response_model=Dict[str, Any])
 def grapes_ripening_stage(
     plot_name: str,
