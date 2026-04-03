@@ -1750,28 +1750,30 @@ def generate_schedule(fruit_date: Optional[str]) -> List[Dict[str, Any]]:
     base_date = datetime.fromisoformat(fruit_date).date()
 
     fruit_started = False
+    day_counter = 0
 
     for _, row in df.iterrows():
 
         stage_text = str(row.get(stage_col, "")).lower()
 
+        # Detect fruit section start
         if "fruit" in stage_text:
             fruit_started = True
+            day_counter = 0
+            continue
 
         if not fruit_started:
             continue
 
-        day = row.get("day_number")
+        # Increment day manually
+        day_counter += 1
 
-        if not day:
-            continue
-
-        actual_date = base_date + timedelta(days=day - 1)
+        actual_date = base_date + timedelta(days=day_counter - 1)
 
         if today <= actual_date <= end_date:
             result.append({
                 "date": actual_date.isoformat(),
-                "day": day,
+                "day": day_counter,
                 "stage": row.get(stage_col, ""),
                 "issue": row.get(issue_col, ""),
                 "recommendation": row.get(rec_col, ""),
@@ -1783,7 +1785,6 @@ def generate_schedule(fruit_date: Optional[str]) -> List[Dict[str, Any]]:
     result.sort(key=lambda x: x["date"])
 
     return result
-
 
 # -----------------------------
 # Today Task
