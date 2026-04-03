@@ -1658,7 +1658,7 @@ async def pest_detection_by_crop(
 # GRAPES Fertilizer SCHEDULE LOGIC
 # ============================================================
 # Load CSV once at startup
-df = pd.read_csv("Grapes_Schedule.csv", encoding="latin-1")
+df = pd.read_csv("Grapes_Schedule.csv", encoding="utf-8")
 
 # -----------------------------
 # Helpers
