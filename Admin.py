@@ -1653,64 +1653,76 @@ async def pest_detection_by_crop(
         raise HTTPException(status_code=404, detail="No satellite data available")
 
     return result
- 
-# ============================================================
-# GRAPES SCHEDULE LOGIC (ONLY FRUIT PHASE - CLEAN VERSION)
-# ============================================================
-
-import pandas as pd
-from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Any
-
+ # -----------------------------
+# Load CSV properly (FIXED)
 # -----------------------------
-# Load CSV safely
-# -----------------------------
-def load_csv_safely(path):
-    try:
-        return pd.read_csv(path, encoding="utf-8")
-    except:
-        try:
-            return pd.read_csv(
-                path,
-                encoding="latin-1",
-                engine="python",
-                on_bad_lines="skip"
-            )
-        except:
-            with open(path, "r", errors="ignore") as f:
-                return pd.read_csv(f, engine="python")
+def load_csv_fixed(path):
+
+    # Read raw without header
+    df_raw = pd.read_csv(
+        path,
+        encoding="latin-1",
+        engine="python",
+        header=None
+    )
+
+    # Find header row (the row which contains 'day' or 'stage')
+    header_row_index = None
+
+    for i, row in df_raw.iterrows():
+        row_str = " ".join([str(x).lower() for x in row.values])
+
+        if "day" in row_str and "stage" in row_str:
+            header_row_index = i
+            break
+
+    if header_row_index is None:
+        raise Exception("Could not detect header row in CSV")
+
+    # Reload with correct header
+    df = pd.read_csv(
+        path,
+        encoding="latin-1",
+        engine="python",
+        header=header_row_index
+    )
+
+    return df
 
 
-df = load_csv_safely("Grapes_Schedule.csv")
+df = load_csv_fixed("Grapes_Schedule.csv")
 
-# Clean column names
+# Clean columns
 df.columns = (
     df.columns
+    .astype(str)
     .str.strip()
     .str.replace("\n", " ", regex=False)
     .str.replace("  ", " ", regex=False)
 )
 
-print("CSV Columns:", df.columns.tolist())  # DEBUG (remove later)
+print("✅ Fixed Columns:", df.columns.tolist())
 
 # -----------------------------
-# Detect correct DAY column
+# Detect columns safely
 # -----------------------------
-day_col = next(
-    (col for col in df.columns if "day" in col.lower()),
-    None
-)
+day_col = next((c for c in df.columns if "day" in c.lower()), None)
+stage_col = next((c for c in df.columns if "stage" in c.lower()), "")
+issue_col = next((c for c in df.columns if "disease" in c.lower()), "")
+rec_col = next((c for c in df.columns if "management" in c.lower()), "")
+org_col = next((c for c in df.columns if "organic" in c.lower()), "")
+nut_col = next((c for c in df.columns if "nutrient" in c.lower()), "")
 
 if not day_col:
-    raise Exception("No DAY column found in CSV")
+    raise Exception("Still no DAY column found after fixing CSV")
 
 # -----------------------------
 # Helpers
 # -----------------------------
 def parse_day(value):
-    if isinstance(value, str) and "DAY" in value.upper():
+    if isinstance(value, str) and "day" in value.lower():
         try:
-            return int(value.upper().replace("DAY", "").strip())
+            return int(value.lower().replace("day", "").strip())
         except:
             return None
     elif isinstance(value, (int, float)):
@@ -1720,15 +1732,7 @@ def parse_day(value):
 
 df["day_number"] = df[day_col].apply(parse_day)
 
-# Fill NaN
 df = df.fillna("")
-
-# Detect useful columns safely
-stage_col = next((c for c in df.columns if "stage" in c.lower()), "")
-issue_col = next((c for c in df.columns if "disease" in c.lower()), "")
-rec_col = next((c for c in df.columns if "management" in c.lower()), "")
-org_col = next((c for c in df.columns if "organic" in c.lower()), "")
-nut_col = next((c for c in df.columns if "nutrient" in c.lower()), "")
 
 # -----------------------------
 # Core Logic (ONLY FRUIT)
@@ -1751,7 +1755,6 @@ def generate_schedule(fruit_date: Optional[str]) -> List[Dict[str, Any]]:
 
         stage_text = str(row.get(stage_col, "")).lower()
 
-        # Detect fruit section start
         if "fruit" in stage_text:
             fruit_started = True
 
@@ -1811,7 +1814,7 @@ async def get_grapes_schedule(plot_name: str) -> Dict[str, Any]:
     if not fruit_date:
         return {"error": "No fruit pruning date available"}
 
-    schedule = generate_schedule(fruit_date=fruit_date)
+    schedule = generate_schedule(fruit_date)
 
     today_task = get_today_task(schedule)
 
