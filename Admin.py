@@ -1654,6 +1654,307 @@ async def pest_detection_by_crop(
 
     return result
  
+# ============================================================
+# GRAPES Fertilizer SCHEDULE LOGIC
+# ============================================================
+# Load CSV once at startup
+df = pd.read_csv("Grapes_Schedule.csv")
+
+# -----------------------------
+# Helpers
+# -----------------------------
+
+def parse_day(value):
+    if isinstance(value, str) and "DAY" in value.upper():
+        try:
+            return int(value.upper().replace("DAY", "").strip())
+        except:
+            return None
+    return None
+
+
+df["day_number"] = df["Days after pruning or growth stage"].apply(parse_day)
+
+# Clean NaN
+df = df.fillna("")
+
+# -----------------------------
+# Detect phases
+# -----------------------------
+def is_foundation_row(row):
+    # Before fruit pruning section
+    return "foundation" in str(row["crop stages"]).lower() or row["day_number"] is not None
+
+def is_fruit_row(row):
+    return "fruit" in str(row["crop stages"]).lower() or "Day" in str(row["Days after pruning or growth stage"])
+
+
+# -----------------------------
+# Core Logic
+# -----------------------------
+
+def generate_schedule(
+    foundation_date: Optional[str],
+    fruit_date: Optional[str]
+) -> List[Dict[str, Any]]:
+
+    result = []
+
+    today = datetime.today().date()
+    end_date = today + timedelta(days=7)
+
+    # -------------------------
+    # FOUNDATION PHASE
+    # -------------------------
+    if foundation_date:
+        base_date = datetime.fromisoformat(foundation_date).date()
+
+        for _, row in df.iterrows():
+            day = row["day_number"]
+
+            if not day:
+                continue
+
+            actual_date = base_date + timedelta(days=day - 1)
+
+            if today <= actual_date <= end_date:
+                result.append({
+                    "date": actual_date.isoformat(),
+                    "day": day,
+                    "stage": row.get("crop stages", ""),
+                    "issue": row.get("Diseases/ Pest /canopy/Nutrints/water/PGR", ""),
+                    "recommendation": row.get("Management Practices & Application", ""),
+                    "organic": row.get("Organic Practices & Application", ""),
+                    "nutrient": row.get("NUTRIENT DOSE", ""),
+                    "type": "foundation"
+                })
+
+    # -------------------------
+    # FRUIT PHASE
+    # -------------------------
+    if fruit_date:
+        base_date = datetime.fromisoformat(fruit_date).date()
+
+        fruit_started = False
+
+        for _, row in df.iterrows():
+
+            # Detect start of fruit section
+            if "fruit prunning" in str(row["crop stages"]).lower():
+                fruit_started = True
+
+            if not fruit_started:
+                continue
+
+            day = parse_day(row["Days after pruning or growth stage"])
+
+            if not day:
+                continue
+
+            actual_date = base_date + timedelta(days=day - 1)
+
+            if today <= actual_date <= end_date:
+                result.append({
+                    "date": actual_date.isoformat(),
+                    "day": day,
+                    "stage": row.get("crop stages", ""),
+                    "issue": row.get("Diseases/ Pest /canopy/Nutrints/water/PGR", ""),
+                    "recommendation": row.get("Management Practices & Application", ""),
+                    "organic": row.get("Organic Practices & Application", ""),
+                    "nutrient": row.get("NUTRIENT DOSE", ""),
+                    "type": "fruit"
+                })
+
+    # Sort by date
+    result.sort(key=lambda x: x["date"])
+
+    return result
+
+
+def get_today_task(schedule: List[Dict]) -> Optional[Dict]:
+    today_str = datetime.today().date().isoformat()
+    for item in schedule:
+        if item["date"] == today_str:
+            return item
+    return None
+
+@app.get("/grapes-schedule/{plot_name}")
+async def get_grapes_schedule(plot_name: str) -> Dict[str, Any]:
+
+    plots = plot_service.get_plots_dict()
+
+    if plot_name not in plots:
+        return {"error": "Plot not found"}
+
+    plot = plots[plot_name]["properties"]
+
+    foundation_date = plot.get("foundation_pruning_date")
+    fruit_date = plot.get("fruit_pruning_date")
+
+    if not foundation_date and not fruit_date:
+        return {"error": "No pruning dates available"}
+
+    schedule = generate_schedule(
+        foundation_date=foundation_date,
+        fruit_date=fruit_date
+    )
+
+    today_task = get_today_task(schedule)
+
+    return {
+        "plot": plot_name,
+        "foundation_pruning_date": foundation_date,
+        "fruit_pruning_date": fruit_date,
+        "today": today_task,
+        "next_7_days": schedule
+    }
+
+# ============================================================
+# Risk Assessment (Pest + Disease + Weeds)
+# ============================================================
+
+PEST_DISEASE_RULES = [
+
+    # ================= DISEASES =================
+    {"name": "Downy mildew", "type": "disease", "category": "fungi", "stage_range": (20, 80), "months": ["aug","sep","oct","nov","dec","jan"]},
+    {"name": "Powdery mildew", "type": "disease", "category": "fungi", "stage_range": (30, 90), "months": ["oct","nov","dec","jan"]},
+    {"name": "Anthracnose", "type": "disease", "category": "fungi", "stage_range": (15, 50), "months": ["sep","oct"]},
+
+    # ================= CHEWING =================
+    {"name": "Flea beetle", "type": "pest", "category": "chewing", "stage_range": (10, 30), "months": ["sep","oct"]},
+    {"name": "Leaf roller", "type": "pest", "category": "chewing", "stage_range": (20, 45), "months": ["oct","nov"]},
+    {"name": "Sphingid caterpillar", "type": "pest", "category": "chewing", "stage_range": (15, 40), "months": ["jul","aug","sep"]},
+    {"name": "Stem girdler", "type": "pest", "category": "chewing", "stage_range": (30, 70), "months": ["aug","sep","oct","nov"]},
+
+    # ================= SUCKING =================
+    {"name": "Mealybug", "type": "pest", "category": "sucking", "stage_range": (65, 120), "months": ["dec","jan","feb","mar","apr"]},
+    {"name": "Thrips", "type": "pest", "category": "sucking", "stage_range": (30, 70), "months": ["oct","nov","dec","jan"]},
+    {"name": "Fruit sucking moth", "type": "pest", "category": "sucking", "stage_range": (90, 130), "months": ["dec","jan","feb","mar","apr"]},
+
+    # ================= SOIL =================
+    {"name": "Grub", "type": "pest", "category": "soilborne", "stage_range": (45, 80), "months": ["jun","jul","aug","sep"]},
+    {"name": "Fusarium wilt", "type": "disease", "category": "soilborne", "stage_range": (20, 75), "months": ["oct","nov","dec","jan","feb"]},
+]
+
+
+# ============================================================
+# WEED RULES (MONTH BASED ONLY)
+# ============================================================
+
+WEED_RULES = [
+    {"name": "Congress Grass (Gajar Gavat)", "months": ["feb","mar","apr","may","jun","jul","aug","sep","oct"]},
+    {"name": "Math (Pigweed)", "months": ["mar","apr","may","jun","jul","aug"]},
+    {"name": "Hararali (Doob Grass)", "months": ["jan","feb","mar","apr","may","jun","jul","aug","sep","oct","nov","dec"]},
+    {"name": "Dudhi Gavat (Spurge)", "months": ["jun","jul","aug","sep","oct","nov"]},
+    {"name": "Chiktya (Sticky Weed)", "months": ["nov","dec","jan","feb"]},
+]
+
+
+# ============================================================
+# MAIN RISK ENGINE
+# ============================================================
+
+def calculate_risk(plot_data, pixel_data):
+
+    plantation_date = plot_data["properties"].get("plantation_date")
+
+    if not plantation_date:
+        return {}
+
+    # Days since plantation
+    plantation_dt = datetime.strptime(plantation_date, "%Y-%m-%d")
+    days = (datetime.utcnow() - plantation_dt).days
+
+    current_month = datetime.utcnow().strftime("%b").lower()
+
+    result = {
+        "pests": {"High": [], "Moderate": [], "Low": []},
+        "diseases": {"High": [], "Moderate": [], "Low": []},
+        "weeds": {"High": [], "Moderate": [], "Low": []},
+    }
+
+    # =====================================================
+    # PEST + DISEASE
+    # =====================================================
+
+    for rule in PEST_DISEASE_RULES:
+
+        stage_match = rule["stage_range"][0] <= days <= rule["stage_range"][1]
+        month_match = current_month in rule["months"]
+
+        pixel_value = pixel_data.get(rule["category"], 0)
+
+        # 🔴 HIGH
+        if pixel_value > 0 and stage_match and month_match:
+            result[f"{rule['type']}s"]["High"].append(rule["name"])
+
+        # 🟠 MODERATE
+        elif stage_match and month_match:
+            result[f"{rule['type']}s"]["Moderate"].append(rule["name"])
+
+        # 🟢 LOW
+        elif month_match:
+            result[f"{rule['type']}s"]["Low"].append(rule["name"])
+
+    # =====================================================
+    # WEEDS (MONTH ONLY LOGIC)
+    # =====================================================
+
+    for weed in WEED_RULES:
+
+        if current_month in weed["months"]:
+            # mimic frontend behavior:
+            result["weeds"]["High"].append(weed["name"])
+
+        else:
+            result["weeds"]["Low"].append(weed["name"])
+
+    return result
+
+
+# ============================================================
+# ENDPOINT
+# ============================================================
+
+@app.get("/risk-assessment")
+async def risk_assessment(plot_name: str):
+
+    # 1. Resolve plot
+    resolved_name, plot_data = _resolve_plot_or_refresh(plot_name)
+
+    if not plot_data:
+        raise HTTPException(status_code=404, detail="Plot not found")
+
+    # 2. Run satellite detection
+    pest_detection = run_pest_detection_analysis_by_plot(
+        plot_name=resolved_name,
+        plot_data=plot_data,
+        start_date=(datetime.utcnow() - timedelta(days=15)).strftime("%Y-%m-%d"),
+        end_date=datetime.utcnow().strftime("%Y-%m-%d"),
+    )
+
+    if not pest_detection:
+        raise HTTPException(status_code=404, detail="No satellite data")
+
+    px = pest_detection["pixel_summary"]
+
+    # ✅ FIXED KEYS (IMPORTANT)
+    pixel_data = {
+        "fungi": px.get("fungi_affected_pixel_percentage", 0),
+        "chewing": px.get("chewing_affected_pixel_percentage", 0),
+        "sucking": px.get("sucking_affected_pixel_percentage", 0),
+        "soilborne": px.get("SoilBorn_affected_pixel_percentage", 0),
+    }
+
+    # 3. Calculate risk
+    risk = calculate_risk(plot_data, pixel_data)
+
+    return {
+        "plot_name": plot_name,
+        "risk": risk,
+        "pixel_data": pixel_data
+    }
+
 
 
 # =========================
