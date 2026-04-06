@@ -1829,6 +1829,13 @@ async def get_all_stats(
     agrostats_cache[cache_key] = combined_stats
     return combined_stats
 
+from datetime import datetime, timedelta
+from typing import Dict, Any
+import ee
+from fastapi import FastAPI
+
+app = FastAPI()
+
 @app.post("/grapes/ripening-stage", response_model=Dict[str, Any])
 def grapes_ripening_stage(
     plot_name: str,
@@ -1930,15 +1937,19 @@ def grapes_ripening_stage(
     harvest_ready_start_date = safe_get(harvest_start)
     harvest_ready_end_date = safe_get(harvest_end)
 
-    # ---------------- CROP STATUS (NEW LOGIC) ----------------
+    # ============================================================
+    # ✅ FIXED CROP STATUS LOGIC (PRIORITY-BASED)
+    # ============================================================
     crop_status = None
 
-    if ripening_start_date and harvest_ready_start_date:
-        crop_status = "Ripening"
-    elif ripening_start_date:
-        crop_status = "Growing"
-    elif harvest_ready_start_date and not ripening_start_date:
+    if harvest_ready_start_date:
         crop_status = "Harvested"
+    elif ripening_start_date:
+        crop_status = "Ripening"
+    elif ndre_peak_date:
+        crop_status = "Growing"
+    else:
+        crop_status = "No Data"
 
     # ---------------- FEATURE ----------------
     feature = {
@@ -1962,7 +1973,7 @@ def grapes_ripening_stage(
             "ripening_start_date": ripening_start_date,
             "harvest_ready_start_date": harvest_ready_start_date,
             "harvest_ready_end_date": harvest_ready_end_date,
-            "crop_status": crop_status,  # ✅ added here
+            "crop_status": crop_status,
         },
         "last_updated": datetime.utcnow().isoformat(),
     }
