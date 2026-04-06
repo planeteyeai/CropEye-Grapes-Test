@@ -2000,7 +2000,7 @@ def grapes_ripening_stage(
             "crop_status": crop_status,
         },
         "last_updated": datetime.utcnow().isoformat(),
-    }}
+    }
 
 @app.post("/grapes/yield-estimation")
 def grapes_yield_estimation(
