@@ -1861,7 +1861,14 @@ def get_effective_days(plot_data):
 
 
 # ============================================================
-# MAIN RISK ENGINE
+# IMPLEMENTED RULES (IMPORTANT FIX)
+# ============================================================
+
+IMPLEMENTED_RULES = ["Downy mildew", "Thrips", "Mealybug"]
+
+
+# ============================================================
+# MAIN RISK ENGINE (FIXED)
 # ============================================================
 
 def calculate_risk(plot_data, pixel_data):
@@ -1875,22 +1882,38 @@ def calculate_risk(plot_data, pixel_data):
         "weeds": {"High": [], "Moderate": [], "Low": []},
     }
 
-    # ================= PEST + DISEASE =================
-
     for rule in PEST_DISEASE_RULES:
 
         stage_match = rule["stage_range"][0] <= days <= rule["stage_range"][1]
         month_match = current_month in rule["months"]
         pixel_value = pixel_data.get(rule["category"], 0)
 
-        if pixel_value > 0 and stage_match and month_match:
-            result[f"{rule['type']}s"]["High"].append(rule["name"])
+        is_implemented = rule["name"] in IMPLEMENTED_RULES
 
-        elif stage_match and month_match:
-            result[f"{rule['type']}s"]["Moderate"].append(rule["name"])
+        # =====================================================
+        # ✅ IMPLEMENTED → USE PIXEL DATA
+        # =====================================================
+        if is_implemented:
 
-        elif month_match:
-            result[f"{rule['type']}s"]["Low"].append(rule["name"])
+            if pixel_value > 0 and stage_match and month_match:
+                result[f"{rule['type']}s"]["High"].append(rule["name"])
+
+            elif stage_match and month_match:
+                result[f"{rule['type']}s"]["Moderate"].append(rule["name"])
+
+            elif month_match:
+                result[f"{rule['type']}s"]["Low"].append(rule["name"])
+
+        # =====================================================
+        # ❌ NOT IMPLEMENTED → IGNORE PIXEL DATA
+        # =====================================================
+        else:
+
+            if stage_match and month_match:
+                result[f"{rule['type']}s"]["Moderate"].append(rule["name"])
+
+            elif month_match:
+                result[f"{rule['type']}s"]["Low"].append(rule["name"])
 
     # ================= WEEDS =================
 
