@@ -1836,10 +1836,10 @@ def grapes_ripening_stage(
     end_date: str | None = None,
 ):
 
-    # ---------------- DEFAULT DATES ----------------
+    # ---------------- DEFAULT DATES (LONG WINDOW) ----------------
     today = datetime.utcnow().date()
     end_date = end_date or today.strftime("%Y-%m-%d")
-    start_date = start_date or (today - timedelta(days=15)).strftime("%Y-%m-%d")
+    start_date = start_date or (today - timedelta(days=120)).strftime("%Y-%m-%d")
 
     _, plot = _resolve_plot_or_refresh(plot_name)
     geometry = ee.Geometry(plot["geometry"])
@@ -1851,6 +1851,20 @@ def grapes_ripening_stage(
         .filterDate(start_date, end_date)
         .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 20))
     )
+
+    # ---------------- CLOUD MASK ----------------
+    def mask_s2(img):
+        scl = img.select("SCL")
+        mask = (
+            scl.neq(3)
+            .And(scl.neq(7))
+            .And(scl.neq(8))
+            .And(scl.neq(9))
+            .And(scl.neq(10))
+        )
+        return img.updateMask(mask).copyProperties(img, ["system:time_start"])
+
+    s2 = s2.map(mask_s2)
 
     # ---------------- NDRE ----------------
     def add_ndre(img):
@@ -1882,9 +1896,14 @@ def grapes_ripening_stage(
         )
     ).filter(ee.Filter.notNull(["NDRE"]))
 
-    # ---------------- MAX NDRE ----------------
-    max_ndre = ee.Number(ts.aggregate_max("NDRE"))
+    # ---------------- SAFE SIZE CHECK ----------------
+    ts_size = ts.size()
 
+    max_ndre = ee.Number(
+        ee.Algorithms.If(ts_size.gt(0), ts.aggregate_max("NDRE"), 0)
+    )
+
+    # ---------------- ADD RATIO ----------------
     ts = ts.map(
         lambda f: f.set(
             "ratio",
@@ -1894,8 +1913,8 @@ def grapes_ripening_stage(
 
     ts = ts.sort("millis")
 
-    # ---------------- PEAK ----------------
-    ndre_peak = ts.sort("NDRE", False).first()
+    # ---------------- PEAK (EXACT MATCH) ----------------
+    ndre_peak = ts.filter(ee.Filter.eq("NDRE", max_ndre)).first()
     peak_millis = ee.Number(ndre_peak.get("millis"))
 
     # ---------------- AFTER PEAK ----------------
@@ -1931,18 +1950,30 @@ def grapes_ripening_stage(
     harvest_ready_end_date = safe_get(harvest_end)
 
     # ============================================================
-    # ✅ FIXED CROP STATUS LOGIC (PRIORITY-BASED)
+    # 🚨 FINAL CROP STATUS LOGIC (NO REPEAT CYCLE)
     # ============================================================
-    crop_status = None
+    crop_status = "No Data"
 
-    if harvest_ready_start_date:
-        crop_status = "Harvested"
+    if harvest_ready_end_date:
+        try:
+            harvest_end_dt = datetime.fromisoformat(harvest_ready_end_date).date()
+
+            # ✅ If harvest already completed → LOCK STATUS
+            if harvest_end_dt < today:
+                crop_status = "Harvested"
+
+            # ✅ If currently in harvest window
+            elif harvest_ready_start_date:
+                crop_status = "Harvested"
+
+        except:
+            crop_status = "Harvested"
+
     elif ripening_start_date:
         crop_status = "Ripening"
+
     elif ndre_peak_date:
         crop_status = "Growing"
-    else:
-        crop_status = "No Data"
 
     # ---------------- FEATURE ----------------
     feature = {
@@ -1969,7 +2000,7 @@ def grapes_ripening_stage(
             "crop_status": crop_status,
         },
         "last_updated": datetime.utcnow().isoformat(),
-    }
+    }}
 
 @app.post("/grapes/yield-estimation")
 def grapes_yield_estimation(
