@@ -163,7 +163,9 @@ async def get_curr_weather(
     cache[q] = response
     return response
 
-# 🌧 Core Logic Function
+# -------------------------
+# Rain Logic
+# -------------------------
 def calculate_rain_score(data: WeatherData):
     rain_score = 0
 
@@ -173,9 +175,9 @@ def calculate_rain_score(data: WeatherData):
     precip = data.precip_mm
     cloud = data.cloud
     pressure = data.pressure_mb
-    dew = data.dewpoint_c if data.dewpoint_c is not None else temp - 8
+    dew = data.dewpoint_c if data.dewpoint_c else temp - 8
 
-    # Humidity
+    # humidity
     if humidity >= 80:
         rain_score += 3
     elif humidity >= 60:
@@ -183,7 +185,7 @@ def calculate_rain_score(data: WeatherData):
     elif humidity >= 45:
         rain_score += 1
 
-    # Cloud cover
+    # cloud
     if cloud >= 80:
         rain_score += 3
     elif cloud >= 60:
@@ -191,7 +193,7 @@ def calculate_rain_score(data: WeatherData):
     elif cloud >= 40:
         rain_score += 1
 
-    # Pressure
+    # pressure
     if pressure <= 1005:
         rain_score += 3
     elif pressure <= 1010:
@@ -199,7 +201,7 @@ def calculate_rain_score(data: WeatherData):
     elif pressure <= 1015:
         rain_score += 1
 
-    # Dew point difference
+    # dew diff
     diff = temp - dew
     if diff <= 2:
         rain_score += 3
@@ -208,40 +210,96 @@ def calculate_rain_score(data: WeatherData):
     elif diff <= 6:
         rain_score += 1
 
-    # Current rain
+    # precipitation
     if precip > 0:
         rain_score += 3
 
-    # Wind factor
+    # wind
     if wind >= 15 and humidity >= 60:
         rain_score += 1
 
     return rain_score
 
 
-# 🌧 Decision Logic
-def get_rain_prediction(score: int):
+def get_prediction(score: int):
     if score >= 10:
-        return {"alert": "HIGH CHANCE OF RAIN", "probability": "75-90%"}
+        return "HIGH", "75-90%"
     elif score >= 7:
-        return {"alert": "MEDIUM CHANCE OF RAIN", "probability": "50-70%"}
+        return "MEDIUM", "50-70%"
     elif score >= 4:
-        return {"alert": "LOW CHANCE OF RAIN", "probability": "30-50%"}
+        return "LOW", "30-50%"
     else:
-        return {"alert": "VERY LOW CHANCE OF RAIN", "probability": "0-20%"}
+        return "VERY LOW", "0-20%"
 
 
-# 🚀 API Endpoint
+# -------------------------
+# Current Weather API
+# -------------------------
+@app.get("/current-weather")
+async def get_weather(request: Request, city: str = Query(...)):
+    if city in cache:
+        return cache[city]
+
+    async with httpx.AsyncClient() as client:
+        params = {"key": API_KEY, "q": city}
+        r = await client.get(BASE_URL, params=params)
+
+    if r.status_code != 200:
+        raise HTTPException(500, "Weather API error")
+
+    data = r.json()
+
+    current = data["current"]
+
+    result = {
+        "temperature_c": current["temp_c"],
+        "humidity": current["humidity"],
+        "wind_kph": current["wind_kph"],
+        "precip_mm": current["precip_mm"],
+        "cloud": current["cloud"],
+        "pressure_mb": current["pressure_mb"],
+        "dewpoint_c": current["dewpoint_c"]
+    }
+
+    cache[city] = result
+    return result
+
+
+# -------------------------
+# Manual Prediction API
+# -------------------------
 @app.post("/predict-rain")
 def predict_rain(data: WeatherData):
     score = calculate_rain_score(data)
-    result = get_rain_prediction(score)
+    level, prob = get_prediction(score)
 
     return {
         "rain_score": score,
-        "prediction": result["alert"],
-        "probability": result["probability"]
+        "prediction": level,
+        "probability": prob
     }
+
+
+# -------------------------
+# AUTO Prediction API (BEST)
+# -------------------------
+@app.get("/predict-rain-auto")
+async def predict_auto(city: str):
+    weather = await get_weather(None, city)
+
+    data = WeatherData(**weather)
+
+    score = calculate_rain_score(data)
+    level, prob = get_prediction(score)
+
+    return {
+        "city": city,
+        "weather": weather,
+        "rain_score": score,
+        "prediction": level,
+        "probability": prob
+    }
+
 @app.get("/health")
 async def health():
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
