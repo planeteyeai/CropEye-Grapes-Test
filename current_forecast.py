@@ -151,7 +151,7 @@ async def get_curr_weather(
     if q in cache:
         return cache[q]
 
-    # Prepare request to WeatherAPI
+    # ---------------- CURRENT WEATHER ----------------
     params = {"key": API_KEY, "q": q, "aqi": "yes"}
     async with httpx.AsyncClient(timeout=15) as client:
         r = await client.get(C_BASE_URL, params=params)
@@ -159,86 +159,117 @@ async def get_curr_weather(
             raise HTTPException(502, f"WeatherAPI error: {r.text}")
         data = r.json()
 
-    # Handle WeatherAPI errors (like quota exceeded)
     if "error" in data:
         err = data["error"]
-        code = err.get("code")
-        message = err.get("message", "Unknown WeatherAPI error")
-        raise HTTPException(429 if code == 2007 else 502, detail=message)
+        raise HTTPException(502, err.get("message"))
 
     current = data["current"]
 
-    # ------------------------------
-    # Rain Prediction Logic
-    # ------------------------------
-    humidity = current.get("humidity", 0)
-    cloud = current.get("cloud", 0)
-    pressure_mb = current.get("pressure_mb", 1015)
-    temperature_c = current.get("temp_c", 0)
-    dewpoint_c = current.get("dewpoint_c", temperature_c)
-    precip_mm = current.get("precip_mm", 0)
-    wind_kph = current.get("wind_kph", 0)
+    # ---------------- RAIN SCORE (CURRENT) ----------------
+    def calculate_rain_score(humidity, cloud, pressure_mb, temp_c, dew_c, precip, wind):
+        score = 0
 
-    rain_score = 0
+        if humidity >= 80: score += 3
+        elif humidity >= 60: score += 2
+        elif humidity >= 45: score += 1
 
-    # Humidity contribution
-    if humidity >= 80:
-        rain_score += 3
-    elif humidity >= 60:
-        rain_score += 2
-    elif humidity >= 45:
-        rain_score += 1
+        if cloud >= 80: score += 3
+        elif cloud >= 60: score += 2
+        elif cloud >= 40: score += 1
 
-    # Cloud cover contribution
-    if cloud >= 80:
-        rain_score += 3
-    elif cloud >= 60:
-        rain_score += 2
-    elif cloud >= 40:
-        rain_score += 1
+        if pressure_mb <= 1005: score += 3
+        elif pressure_mb <= 1010: score += 2
+        elif pressure_mb <= 1015: score += 1
 
-    # Pressure contribution (low pressure = rain chance)
-    if pressure_mb <= 1005:
-        rain_score += 3
-    elif pressure_mb <= 1010:
-        rain_score += 2
-    elif pressure_mb <= 1015:
-        rain_score += 1
+        diff = temp_c - dew_c
+        if diff <= 2: score += 3
+        elif diff <= 4: score += 2
+        elif diff <= 6: score += 1
 
-    # Dew point difference
-    temp_diff = temperature_c - dewpoint_c
+        if precip > 0: score += 3
 
-    if temp_diff <= 2:
-        rain_score += 3
-    elif temp_diff <= 4:
-        rain_score += 2
-    elif temp_diff <= 6:
-        rain_score += 1
+        if wind >= 15 and humidity >= 60:
+            score += 1
 
-    # Current rain indicator
-    if precip_mm > 0:
-        rain_score += 3
+        return score
 
-    # Wind effect
-    if wind_kph >= 15 and humidity >= 60:
-        rain_score += 1
+    rain_score = calculate_rain_score(
+        current.get("humidity", 0),
+        current.get("cloud", 0),
+        current.get("pressure_mb", 1015),
+        current.get("temp_c", 0),
+        current.get("dewpoint_c", current.get("temp_c", 0)),
+        current.get("precip_mm", 0),
+        current.get("wind_kph", 0)
+    )
 
-    # ------------------------------
-    # Rain Alert Mapping
-    # ------------------------------
-    if rain_score >= 10:
-        alert = "HIGH CHANCE OF RAIN"
-        probability = "75-90%"
-    elif rain_score >= 7:
-        alert = "MEDIUM CHANCE OF RAIN"
-        probability = "50-70%"
-    elif rain_score >= 4:
-        alert = "LOW CHANCE OF RAIN"
-        probability = "30-50%"
-    else:
-        alert = "VERY LOW CHANCE OF RAIN"
-        probability = "0-20%"
+    def map_alert(score):
+        if score >= 10:
+            return "HIGH CHANCE OF RAIN", "75-90%"
+        elif score >= 7:
+            return "MEDIUM CHANCE OF RAIN", "50-70%"
+        elif score >= 4:
+            return "LOW CHANCE OF RAIN", "30-50%"
+        else:
+            return "VERY LOW CHANCE OF RAIN", "0-20%"
 
+    alert, probability = map_alert(rain_score)
+
+    # ---------------- FORECAST (48 HOURS) ----------------
+    forecast_url = "https://api.weatherapi.com/v1/forecast.json"
+    params_forecast = {"key": API_KEY, "q": q, "hours": 48}
+
+    async with httpx.AsyncClient(timeout=15) as client:
+        f = await client.get(forecast_url, params=params_forecast)
+        forecast_data = f.json()
+
+    hourly_data = forecast_data["forecast"]["forecastday"]
+
+    best_hour = None
+    best_score = -1
+
+    time_buckets = {
+        "morning": [],
+        "afternoon": [],
+        "night": []
+    }
+
+    for day in hourly_data:
+        for hour in day["hour"]:
+            score = calculate_rain_score(
+                hour.get("humidity", 0),
+                hour.get("cloud", 0),
+                hour.get("pressure_mb", 1015),
+                hour.get("temp_c", 0),
+                hour.get("dewpoint_c", hour.get("temp_c", 0)),
+                hour.get("precip_mm", 0),
+                hour.get("wind_kph", 0)
+            )
+
+            time_str = hour["time"]
+            hour_val = int(time_str.split(" ")[1].split(":")[0])
+
+            # Bucket classification
+            if 6 <= hour_val < 12:
+                bucket = "morning"
+            elif 12 <= hour_val < 18:
+                bucket = "afternoon"
+            else:
+                bucket = "night"
+
+            time_buckets[bucket].append(score)
+
+            if score > best_score:
+                best_score = score
+                best_hour = time_str
+
+    # Find best time of day
+    avg_scores = {k: (sum(v)/len(v) if v else 0) for k, v in time_buckets.items()}
+    best_time_of_day = max(avg_scores, key=avg_scores.get)
+
+    future_alert, future_probability = map_alert(best_score)
+
+    # ---------------- RESPONSE ----------------
     response = {
         "location": data["location"]["name"],
         "region": data["location"]["region"],
@@ -247,8 +278,8 @@ async def get_curr_weather(
         "latitude": data["location"]["lat"],
         "longitude": data["location"]["lon"],
 
-        # Weather details
-        "temperature_c": current["temp_c"], 
+        # Current weather
+        "temperature_c": current["temp_c"],
         "humidity": current["humidity"],
         "wind_kph": current["wind_kph"],
         "precip_mm": current["precip_mm"],
@@ -257,13 +288,20 @@ async def get_curr_weather(
         "dewpoint_c": current.get("dewpoint_c"),
         "condition_text": current.get("condition", {}).get("text"),
 
-        # ✅ Rain prediction output
+        # Current rain prediction
         "rain_score": rain_score,
         "rain_alert": alert,
-        "rain_probability": probability
+        "rain_probability": probability,
+
+        # 🔥 NEW: 24–48 hour prediction
+        "next_48h_prediction": {
+            "most_likely_time": best_hour,
+            "best_time_of_day": best_time_of_day,
+            "rain_alert": future_alert,
+            "rain_probability": future_probability
+        }
     }
 
-    # Save to cache
     cache[q] = response
     return response
 
