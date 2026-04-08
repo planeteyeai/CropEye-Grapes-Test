@@ -129,17 +129,15 @@ async def health_check():
 
 
 @app.get("/current-weather")
-# @limiter.limit("100/minute")  # limit per IP
 async def get_curr_weather(
     request: Request,
-    lat: float = Query(None, description="Latitude"),
-    lon: float = Query(None, description="Longitude"),
-    city: str = Query(None, description="City name (optional if lat/lon given)")
+    lat: float = Query(None),
+    lon: float = Query(None),
+    city: str = Query(None)
 ):
     if not API_KEY:
         raise HTTPException(503, "WEATHER_API_KEY not configured")
 
-    # Build query string
     if lat is not None and lon is not None:
         q = f"{lat},{lon}"
     elif city:
@@ -147,26 +145,22 @@ async def get_curr_weather(
     else:
         raise HTTPException(400, "Provide either city or lat/lon")
 
-    # Check cache first
     if q in cache:
         return cache[q]
 
-    # ---------------- CURRENT WEATHER ----------------
+    # -------- CURRENT --------
     params = {"key": API_KEY, "q": q, "aqi": "yes"}
     async with httpx.AsyncClient(timeout=15) as client:
         r = await client.get(C_BASE_URL, params=params)
-        if r.status_code != 200:
-            raise HTTPException(502, f"WeatherAPI error: {r.text}")
         data = r.json()
 
     if "error" in data:
-        err = data["error"]
-        raise HTTPException(502, err.get("message"))
+        raise HTTPException(502, data["error"]["message"])
 
     current = data["current"]
 
-    # ---------------- RAIN SCORE (CURRENT) ----------------
-    def calculate_rain_score(humidity, cloud, pressure_mb, temp_c, dew_c, precip, wind):
+    # -------- RAIN SCORE FUNCTION --------
+    def calculate_rain_score(humidity, cloud, pressure, temp, dew, precip, wind):
         score = 0
 
         if humidity >= 80: score += 3
@@ -177,22 +171,27 @@ async def get_curr_weather(
         elif cloud >= 60: score += 2
         elif cloud >= 40: score += 1
 
-        if pressure_mb <= 1005: score += 3
-        elif pressure_mb <= 1010: score += 2
-        elif pressure_mb <= 1015: score += 1
+        if pressure <= 1005: score += 3
+        elif pressure <= 1010: score += 2
+        elif pressure <= 1015: score += 1
 
-        diff = temp_c - dew_c
+        diff = temp - dew
         if diff <= 2: score += 3
         elif diff <= 4: score += 2
         elif diff <= 6: score += 1
 
         if precip > 0: score += 3
-
-        if wind >= 15 and humidity >= 60:
-            score += 1
+        if wind >= 15 and humidity >= 60: score += 1
 
         return score
 
+    def map_alert(score):
+        if score >= 10: return "HIGH CHANCE OF RAIN", "75-90%"
+        elif score >= 7: return "MEDIUM CHANCE OF RAIN", "50-70%"
+        elif score >= 4: return "LOW CHANCE OF RAIN", "30-50%"
+        else: return "VERY LOW CHANCE OF RAIN", "0-20%"
+
+    # -------- CURRENT SCORE --------
     rain_score = calculate_rain_score(
         current.get("humidity", 0),
         current.get("cloud", 0),
@@ -203,39 +202,28 @@ async def get_curr_weather(
         current.get("wind_kph", 0)
     )
 
-    def map_alert(score):
-        if score >= 10:
-            return "HIGH CHANCE OF RAIN", "75-90%"
-        elif score >= 7:
-            return "MEDIUM CHANCE OF RAIN", "50-70%"
-        elif score >= 4:
-            return "LOW CHANCE OF RAIN", "30-50%"
-        else:
-            return "VERY LOW CHANCE OF RAIN", "0-20%"
-
     alert, probability = map_alert(rain_score)
 
-    # ---------------- FORECAST (48 HOURS) ----------------
+    # -------- FORECAST (48 HOURS FIXED) --------
     forecast_url = "https://api.weatherapi.com/v1/forecast.json"
-    params_forecast = {"key": API_KEY, "q": q, "hours": 48}
+    params_forecast = {"key": API_KEY, "q": q, "days": 2}
 
     async with httpx.AsyncClient(timeout=15) as client:
         f = await client.get(forecast_url, params=params_forecast)
         forecast_data = f.json()
 
-    hourly_data = forecast_data["forecast"]["forecastday"]
-
     best_hour = None
     best_score = -1
 
-    time_buckets = {
-        "morning": [],
-        "afternoon": [],
-        "night": []
-    }
+    time_buckets = {"morning": [], "afternoon": [], "night": []}
 
-    for day in hourly_data:
-        for hour in day["hour"]:
+    for day in forecast_data.get("forecast", {}).get("forecastday", []):
+        for hour in day.get("hour", []):
+
+            time_str = hour.get("time")
+            if not time_str:
+                continue
+
             score = calculate_rain_score(
                 hour.get("humidity", 0),
                 hour.get("cloud", 0),
@@ -246,10 +234,8 @@ async def get_curr_weather(
                 hour.get("wind_kph", 0)
             )
 
-            time_str = hour["time"]
             hour_val = int(time_str.split(" ")[1].split(":")[0])
 
-            # Bucket classification
             if 6 <= hour_val < 12:
                 bucket = "morning"
             elif 12 <= hour_val < 18:
@@ -263,13 +249,12 @@ async def get_curr_weather(
                 best_score = score
                 best_hour = time_str
 
-    # Find best time of day
     avg_scores = {k: (sum(v)/len(v) if v else 0) for k, v in time_buckets.items()}
     best_time_of_day = max(avg_scores, key=avg_scores.get)
 
     future_alert, future_probability = map_alert(best_score)
 
-    # ---------------- RESPONSE ----------------
+    # -------- RESPONSE --------
     response = {
         "location": data["location"]["name"],
         "region": data["location"]["region"],
@@ -278,7 +263,6 @@ async def get_curr_weather(
         "latitude": data["location"]["lat"],
         "longitude": data["location"]["lon"],
 
-        # Current weather
         "temperature_c": current["temp_c"],
         "humidity": current["humidity"],
         "wind_kph": current["wind_kph"],
@@ -288,12 +272,10 @@ async def get_curr_weather(
         "dewpoint_c": current.get("dewpoint_c"),
         "condition_text": current.get("condition", {}).get("text"),
 
-        # Current rain prediction
         "rain_score": rain_score,
         "rain_alert": alert,
         "rain_probability": probability,
 
-        # 🔥 NEW: 24–48 hour prediction
         "next_48h_prediction": {
             "most_likely_time": best_hour,
             "best_time_of_day": best_time_of_day,
