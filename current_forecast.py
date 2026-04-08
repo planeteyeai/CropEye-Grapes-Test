@@ -10,9 +10,8 @@ from cachetools import TTLCache
 import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime
+from pydantic import BaseModel
 
-
-_warmup_task = None
 
 async def _warmup_loop(client: httpx.AsyncClient):
     while True:
@@ -51,7 +50,16 @@ app.add_middleware(GZipMiddleware, minimum_size=256)
 cache = TTLCache(maxsize=1000, ttl=7200)
  
 BASE_URL = "https://api.open-meteo.com/v1/forecast"
- 
+# 📥 Request Model
+class WeatherData(BaseModel):
+    temperature_c: float
+    humidity: float
+    wind_kph: float
+    precip_mm: float = 0
+    cloud: float = 0
+    pressure_mb: float = 1015
+    dewpoint_c: float = None
+_warmup_task = None 
 # ------------------------
 # Forecast Endpoint (Open-Meteo)
 # ------------------------
@@ -154,16 +162,6 @@ async def get_curr_weather(
     # Save to cache
     cache[q] = response
     return response
-# 📥 Request Model
-class WeatherData(BaseModel):
-    temperature_c: float
-    humidity: float
-    wind_kph: float
-    precip_mm: float = 0
-    cloud: float = 0
-    pressure_mb: float = 1015
-    dewpoint_c: float = None
-
 
 # 🌧 Core Logic Function
 def calculate_rain_score(data: WeatherData):
