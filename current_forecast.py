@@ -167,6 +167,78 @@ async def get_curr_weather(
         raise HTTPException(429 if code == 2007 else 502, detail=message)
 
     current = data["current"]
+
+    # ------------------------------
+    # Rain Prediction Logic
+    # ------------------------------
+    humidity = current.get("humidity", 0)
+    cloud = current.get("cloud", 0)
+    pressure_mb = current.get("pressure_mb", 1015)
+    temperature_c = current.get("temp_c", 0)
+    dewpoint_c = current.get("dewpoint_c", temperature_c)
+    precip_mm = current.get("precip_mm", 0)
+    wind_kph = current.get("wind_kph", 0)
+
+    rain_score = 0
+
+    # Humidity contribution
+    if humidity >= 80:
+        rain_score += 3
+    elif humidity >= 60:
+        rain_score += 2
+    elif humidity >= 45:
+        rain_score += 1
+
+    # Cloud cover contribution
+    if cloud >= 80:
+        rain_score += 3
+    elif cloud >= 60:
+        rain_score += 2
+    elif cloud >= 40:
+        rain_score += 1
+
+    # Pressure contribution (low pressure = rain chance)
+    if pressure_mb <= 1005:
+        rain_score += 3
+    elif pressure_mb <= 1010:
+        rain_score += 2
+    elif pressure_mb <= 1015:
+        rain_score += 1
+
+    # Dew point difference
+    temp_diff = temperature_c - dewpoint_c
+
+    if temp_diff <= 2:
+        rain_score += 3
+    elif temp_diff <= 4:
+        rain_score += 2
+    elif temp_diff <= 6:
+        rain_score += 1
+
+    # Current rain indicator
+    if precip_mm > 0:
+        rain_score += 3
+
+    # Wind effect
+    if wind_kph >= 15 and humidity >= 60:
+        rain_score += 1
+
+    # ------------------------------
+    # Rain Alert Mapping
+    # ------------------------------
+    if rain_score >= 10:
+        alert = "HIGH CHANCE OF RAIN"
+        probability = "75-90%"
+    elif rain_score >= 7:
+        alert = "MEDIUM CHANCE OF RAIN"
+        probability = "50-70%"
+    elif rain_score >= 4:
+        alert = "LOW CHANCE OF RAIN"
+        probability = "30-50%"
+    else:
+        alert = "VERY LOW CHANCE OF RAIN"
+        probability = "0-20%"
+
     response = {
         "location": data["location"]["name"],
         "region": data["location"]["region"],
@@ -183,7 +255,12 @@ async def get_curr_weather(
         "cloud": current.get("cloud"),
         "pressure_mb": current.get("pressure_mb"),
         "dewpoint_c": current.get("dewpoint_c"),
-        "condition_text": current.get("condition", {}).get("text")  # optional
+        "condition_text": current.get("condition", {}).get("text"),
+
+        # ✅ Rain prediction output
+        "rain_score": rain_score,
+        "rain_alert": alert,
+        "rain_probability": probability
     }
 
     # Save to cache
