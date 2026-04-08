@@ -284,8 +284,8 @@ def predict_rain(data: WeatherData):
 # AUTO Prediction API (BEST)
 # -------------------------
 @app.get("/predict-rain-auto")
-async def predict_auto(city: str):
-    weather = await get_weather(None, city)
+async def predict_auto(request: Request, city: str):
+    weather = await get_weather(request, city)
 
     data = WeatherData(**weather)
 
