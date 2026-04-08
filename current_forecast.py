@@ -16,7 +16,7 @@ from pydantic import BaseModel
 async def _warmup_loop(client: httpx.AsyncClient):
     while True:
         try:
-            await client.get(BASE_URL, params={"latitude": 18.5, "longitude": 73.8, "daily": "temperature_2m_max", "forecast_days": 1, "timezone": "auto"})
+            await client.get(C_BASE_URL, params={"latitude": 18.5, "longitude": 73.8, "daily": "temperature_2m_max", "forecast_days": 1, "timezone": "auto"})
         except Exception:
             pass
         await asyncio.sleep(5)
@@ -78,7 +78,7 @@ async def forecast(request: Request, lat: float = Query(...), lon: float = Query
         "forecast_days": 8
     }
  
-    response = await request.app.state.http_client.get(BASE_URL, params=params)
+    response = await request.app.state.http_client.get(C_BASE_URL, params=params)
     response.raise_for_status()
     data = response.json()
  
@@ -242,7 +242,7 @@ async def get_weather(request: Request, city: str = Query(...)):
 
     async with httpx.AsyncClient() as client:
         params = {"key": API_KEY, "q": city}
-        r = await client.get(BASE_URL, params=params)
+        r = await client.get(C_BASE_URL, params=params)
 
     if r.status_code != 200:
         raise HTTPException(500, "Weather API error")
