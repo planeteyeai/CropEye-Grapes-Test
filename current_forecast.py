@@ -204,7 +204,7 @@ async def get_curr_weather(
 
     alert, probability = map_alert(rain_score)
 
-    # -------- FORECAST (48 HOURS FIXED) --------
+    # -------- FORECAST --------
     forecast_url = "https://api.weatherapi.com/v1/forecast.json"
     params_forecast = {"key": API_KEY, "q": q, "days": 2}
 
@@ -212,10 +212,11 @@ async def get_curr_weather(
         f = await client.get(forecast_url, params=params_forecast)
         forecast_data = f.json()
 
-    best_hour = None
-    best_score = -1
+    # Buckets for 24h and 48h
+    buckets_24h = {"morning": [], "afternoon": [], "night": []}
+    buckets_48h = {"morning": [], "afternoon": [], "night": []}
 
-    time_buckets = {"morning": [], "afternoon": [], "night": []}
+    hour_counter = 0
 
     for day in forecast_data.get("forecast", {}).get("forecastday", []):
         for hour in day.get("hour", []):
@@ -243,16 +244,29 @@ async def get_curr_weather(
             else:
                 bucket = "night"
 
-            time_buckets[bucket].append(score)
+            # First 24 hours
+            if hour_counter < 24:
+                buckets_24h[bucket].append(score)
 
-            if score > best_score:
-                best_score = score
-                best_hour = time_str
+            # Full 48 hours
+            buckets_48h[bucket].append(score)
 
-    avg_scores = {k: (sum(v)/len(v) if v else 0) for k, v in time_buckets.items()}
-    best_time_of_day = max(avg_scores, key=avg_scores.get)
+            hour_counter += 1
 
-    future_alert, future_probability = map_alert(best_score)
+    # Convert buckets to alerts
+    def build_period_prediction(bucket_dict):
+        result = {}
+        for k, v in bucket_dict.items():
+            avg_score = sum(v)/len(v) if v else 0
+            alert, prob = map_alert(avg_score)
+            result[k] = {
+                "rain_alert": alert,
+                "rain_probability": prob
+            }
+        return result
+
+    prediction_24h = build_period_prediction(buckets_24h)
+    prediction_48h = build_period_prediction(buckets_48h)
 
     # -------- RESPONSE --------
     response = {
@@ -276,17 +290,13 @@ async def get_curr_weather(
         "rain_alert": alert,
         "rain_probability": probability,
 
-        "next_48h_prediction": {
-            "most_likely_time": best_hour,
-            "best_time_of_day": best_time_of_day,
-            "rain_alert": future_alert,
-            "rain_probability": future_probability
-        }
+        # ✅ NEW CLEAN STRUCTURE
+        "next_24h_prediction": prediction_24h,
+        "next_48h_prediction": prediction_48h
     }
 
     cache[q] = response
     return response
-
 
 # ------------------------------
 # Prometheus Metrics Endpoint
