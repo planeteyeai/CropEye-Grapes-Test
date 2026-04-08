@@ -106,7 +106,7 @@ async def forecast(request: Request, lat: float = Query(...), lon: float = Query
 # In-memory cache: max 500 entries, each cached for 1800 seconds (30 mins)
 cache = TTLCache(maxsize=4000, ttl=1800)
 
-API_KEY = "a7977cf38bb044e9a4d82500252008"   # generated using dev1 gmail account
+API_KEY = "99e888878484b86fa12d36927c4ff2b7"   # generated using dev1 gmail account
 C_BASE_URL = "https://api.weatherapi.com/v1/current.json"
 
 @app.get("/current-weather")
