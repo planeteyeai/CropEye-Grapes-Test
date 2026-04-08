@@ -154,7 +154,96 @@ async def get_curr_weather(
     # Save to cache
     cache[q] = response
     return response
+# 📥 Request Model
+class WeatherData(BaseModel):
+    temperature_c: float
+    humidity: float
+    wind_kph: float
+    precip_mm: float = 0
+    cloud: float = 0
+    pressure_mb: float = 1015
+    dewpoint_c: float = None
 
+
+# 🌧 Core Logic Function
+def calculate_rain_score(data: WeatherData):
+    rain_score = 0
+
+    temp = data.temperature_c
+    humidity = data.humidity
+    wind = data.wind_kph
+    precip = data.precip_mm
+    cloud = data.cloud
+    pressure = data.pressure_mb
+    dew = data.dewpoint_c if data.dewpoint_c is not None else temp - 8
+
+    # Humidity
+    if humidity >= 80:
+        rain_score += 3
+    elif humidity >= 60:
+        rain_score += 2
+    elif humidity >= 45:
+        rain_score += 1
+
+    # Cloud cover
+    if cloud >= 80:
+        rain_score += 3
+    elif cloud >= 60:
+        rain_score += 2
+    elif cloud >= 40:
+        rain_score += 1
+
+    # Pressure
+    if pressure <= 1005:
+        rain_score += 3
+    elif pressure <= 1010:
+        rain_score += 2
+    elif pressure <= 1015:
+        rain_score += 1
+
+    # Dew point difference
+    diff = temp - dew
+    if diff <= 2:
+        rain_score += 3
+    elif diff <= 4:
+        rain_score += 2
+    elif diff <= 6:
+        rain_score += 1
+
+    # Current rain
+    if precip > 0:
+        rain_score += 3
+
+    # Wind factor
+    if wind >= 15 and humidity >= 60:
+        rain_score += 1
+
+    return rain_score
+
+
+# 🌧 Decision Logic
+def get_rain_prediction(score: int):
+    if score >= 10:
+        return {"alert": "HIGH CHANCE OF RAIN", "probability": "75-90%"}
+    elif score >= 7:
+        return {"alert": "MEDIUM CHANCE OF RAIN", "probability": "50-70%"}
+    elif score >= 4:
+        return {"alert": "LOW CHANCE OF RAIN", "probability": "30-50%"}
+    else:
+        return {"alert": "VERY LOW CHANCE OF RAIN", "probability": "0-20%"}
+
+
+# 🚀 API Endpoint
+@app.post("/predict-rain")
+def predict_rain(data: WeatherData):
+    score = calculate_rain_score(data)
+    result = get_rain_prediction(score)
+
+    return {
+        "rain_score": score,
+        "prediction": result["alert"],
+        "probability": result["probability"]
+    }
 @app.get("/health")
 async def health():
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
