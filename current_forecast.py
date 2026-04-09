@@ -32,8 +32,7 @@ REQUEST_LATENCY = Histogram(
 # Allow CORS (for frontend use)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://cropeye.ai", "https://www.cropeye.ai", "http://localhost:3000", "http://localhost:5173", "http://127.0.0.1:3000", "http://127.0.0.1:5173","http://192.168.42.72:5174","https://cropeye-00.onrender.com","http://localhost:3098",],
-    allow_credentials=True,
+    allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
