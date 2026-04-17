@@ -921,6 +921,7 @@ if __name__ == "__main__":
     uvicorn.run(
         "SEF:app",
         host="0.0.0.0",
-        port=7002
+        port=7002,
+        reload=True
     )
  
