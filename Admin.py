@@ -2439,4 +2439,4 @@ async def refresh_from_django():
         
 
 if __name__ == "__main__":
-    uvicorn.run("Admin:app", host="0.0.0.0", port=5000, reload=True)
+    uvicorn.run("Admin:app", host="0.0.0.0", port=5000, reload=False)
