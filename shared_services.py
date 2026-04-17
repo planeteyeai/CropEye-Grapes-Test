@@ -1,13 +1,10 @@
-from typing import Dict, Any, Callable, Optional, Awaitable
+from typing import Dict, Any
 import requests
 import time
 from datetime import datetime
 import ee
 import numpy as np
 import math
-import asyncio
-import random
-import threading
 
 # -----------------------------
 # Helpers: safe rounding & JSON sanitization=
@@ -70,69 +67,88 @@ class PlotSyncService:
     """
     Service to fetch plot data from Django /plots/ API
     """
-
+    
     def __init__(self, django_api_url: str = "https://cropeye-backendd.up.railway.app"):
         self.django_api_url = django_api_url
         self.plots_cache = {}
         self.last_sync = None
-        # Keep cache short so apps can refresh every 3-5 seconds safely.
-        self.cache_duration = 4
-        self._cache_lock = threading.Lock()
-        self._session = requests.Session()
-        adapter = requests.adapters.HTTPAdapter(pool_connections=200, pool_maxsize=200, max_retries=2)
-        self._session.mount("http://", adapter)
-        self._session.mount("https://", adapter)
-        self.last_error: Optional[str] = None
-        self.last_successful_sync: Optional[datetime] = None
-        self.refresh_attempts = 0
-        self.refresh_successes = 0
+        self.cache_duration = 300  # 5 minute cache - reduce upstream load and egress
+        self.min_force_refresh_interval = 300  # guard forced refreshes from running too frequently
+        self.last_force_refresh_monotonic = 0.0
+        self.public_plots_etag = None
 
     def fetch_plots_from_api(self) -> Dict[str, Any]:
-        """Fetch all plots from Django API with retries (Django on Render may cold-start)"""
+        """Fetch public plots from Django API with retries, pagination, and ETag support."""
         timeout = 30  # Render cold start can take 30+ seconds
         max_retries = 3
         retry_delay = 8
 
         for attempt in range(max_retries):
             try:
-                response = self._session.get(
-                    f"{self.django_api_url}/api/plots/public/",
-                    headers={'Content-Type': 'application/json'},
-                    timeout=timeout
+                base_url = f"{self.django_api_url}/api/plots/public/"
+                headers = {'Content-Type': 'application/json'}
+                if self.public_plots_etag:
+                    headers["If-None-Match"] = self.public_plots_etag
+
+                response = requests.get(
+                    base_url,
+                    params={"page_size": 100},
+                    headers=headers,
+                    timeout=timeout,
                 )
 
-                if response.status_code == 200:
-                    plots_data = response.json()
-                    return self._process_plots_response(plots_data)
-                else:
-                    print(f"Warning: Django API returned status {response.status_code}. Using empty plot list.")
+                if response.status_code == 304:
+                    return self.plots_cache
+
+                if response.status_code != 200:
+                    print(f"Warning: Django API returned status {response.status_code}.")
                     if attempt < max_retries - 1:
                         print(f"Retrying in {retry_delay}s (attempt {attempt + 2}/{max_retries})...")
                         time.sleep(retry_delay)
-                    else:
-                        return {}
+                        continue
+                    return self.plots_cache
+
+                self.public_plots_etag = response.headers.get("ETag") or self.public_plots_etag
+                first_page = response.json()
+
+                if not isinstance(first_page, dict) or "results" not in first_page:
+                    return self._process_plots_response(first_page)
+
+                all_results = list(first_page.get("results") or [])
+                next_url = first_page.get("next")
+                while next_url:
+                    next_response = requests.get(
+                        next_url,
+                        headers={'Content-Type': 'application/json'},
+                        timeout=timeout,
+                    )
+                    if next_response.status_code != 200:
+                        break
+                    next_data = next_response.json()
+                    all_results.extend(next_data.get("results") or [])
+                    next_url = next_data.get("next")
+
+                return self._process_plots_response({"results": all_results})
 
             except requests.exceptions.RequestException as e:
-                print(f"Warning: Could not connect to Django API: {str(e)}. Using empty plot list.")
+                print(f"Warning: Could not connect to Django API: {str(e)}.")
                 if attempt < max_retries - 1:
                     print(f"Retrying in {retry_delay}s (attempt {attempt + 2}/{max_retries})...")
                     time.sleep(retry_delay)
                 else:
-                    return {}
+                    return self.plots_cache
 
-        return {}
+        return self.plots_cache
 
     def _process_plots_response(self, plots_data: Dict[str, Any]) -> Dict[str, Dict]:
         """Process the Django API response and convert to plot dictionary format"""
         plot_dict = {}
 
-        plots_list = plots_data.get('results') if isinstance(plots_data, dict) else plots_data
-
-        for plot in plots_list or []:
+        for plot in plots_data.get('results', []):
             plot_id = plot.get('id')
             gat_number = plot.get('gat_number', '')
             plot_number = plot.get('plot_number', '')
-
+            
             address = plot.get('address', {})
             village = address.get('village', '')
             field_officer = plot.get('field_officer', {})
@@ -141,21 +157,16 @@ class PlotSyncService:
             farms = plot.get('farms', [])
             plantation_date = None
             plantation_type = None
-            crop_type_name = None
-
-            if farms:
-                crop_type_name = farms[0].get('crop_type_name')
-
+            crop_type_name = plot.get('crop_type_name')
             if crop_type_name is None and isinstance(plot.get('crop_type'), dict):
                 crop_type_name = plot.get('crop_type', {}).get('name')
-            foundation_pruning_date = None
-            fruit_pruning_date = None
-
             if farms:
                 plantation_date = farms[0].get('plantation_date')
                 plantation_type = farms[0].get('plantation_type')
-                foundation_pruning_date = farms[0].get('foundation_pruning_date')
-                fruit_pruning_date = farms[0].get('fruit_pruning_date')
+                if crop_type_name is None:
+                    crop_type_name = farms[0].get('crop_type_name')
+                if crop_type_name is None and isinstance(farms[0].get('crop_type'), dict):
+                    crop_type_name = farms[0].get('crop_type', {}).get('name')
 
             plot_name = f"{gat_number}_{plot_number}" if gat_number and plot_number else gat_number or f"plot_{plot_id}"
 
@@ -214,108 +225,35 @@ class PlotSyncService:
     def get_plots_dict(self, force_refresh: bool = False) -> Dict[str, Dict]:
         """Get plots dictionary, with caching"""
         current_time = datetime.now()
-        with self._cache_lock:
-            if (
-                not force_refresh and
-                self.last_sync and
-                (current_time - self.last_sync).total_seconds() < self.cache_duration and
-                self.plots_cache
-            ):
-                return self.plots_cache
+        now_monotonic = time.monotonic()
 
-            self.refresh_attempts += 1
-            plots_data = self.fetch_plots_from_api()
-            if plots_data:
-                self.plots_cache = plots_data
-                self.last_sync = current_time
-                self.last_successful_sync = current_time
-                self.last_error = None
-                self.refresh_successes += 1
-            else:
-                self.last_error = "Empty or failed sync from Django API"
+        if (
+            not force_refresh
+            and self.last_sync
+            and (current_time - self.last_sync).seconds < self.cache_duration
+            and self.plots_cache
+        ):
             return self.plots_cache
 
-    def health_ping(self) -> bool:
-        """Cheap keep-alive ping to reduce Django cold-start chance."""
-        try:
-            resp = self._session.get(
-                f"{self.django_api_url}/api/plots/public/?page_size=1",
-                timeout=10
-            )
-            return resp.status_code == 200
-        except Exception:
-            return False
+        if (
+            force_refresh
+            and self.plots_cache
+            and (now_monotonic - self.last_force_refresh_monotonic) < self.min_force_refresh_interval
+        ):
+            return self.plots_cache
 
-    def get_refresh_stats(self) -> Dict[str, Any]:
-        return {
-            "last_sync": self.last_sync.isoformat() if self.last_sync else None,
-            "last_successful_sync": self.last_successful_sync.isoformat() if self.last_successful_sync else None,
-            "last_error": self.last_error,
-            "refresh_attempts": self.refresh_attempts,
-            "refresh_successes": self.refresh_successes,
-            "cache_duration_seconds": self.cache_duration,
-            "cached_plots": len(self.plots_cache),
-        }
+        if force_refresh:
+            self.last_force_refresh_monotonic = now_monotonic
+
+        plots_data = self.fetch_plots_from_api()
+        if isinstance(plots_data, dict):
+            self.plots_cache = plots_data
+            self.last_sync = current_time
+            return plots_data
+        return self.plots_cache
+    
 
 
-class PlotKeepAliveManager:
-    """Background refresh loop for high-availability plot sync."""
 
-    def __init__(
-        self,
-        plot_service: PlotSyncService,
-        apply_callback: Callable[[Dict[str, Dict]], Optional[Awaitable[None]]],
-        min_interval_seconds: float = 3.0,
-        max_interval_seconds: float = 5.0,
-    ):
-        self.plot_service = plot_service
-        self.apply_callback = apply_callback
-        self.min_interval_seconds = min_interval_seconds
-        self.max_interval_seconds = max_interval_seconds
-        self._task: Optional[asyncio.Task] = None
-        self._running = False
-        self._last_cycle: Optional[datetime] = None
+    
 
-    async def _apply(self, plots: Dict[str, Dict]) -> None:
-        maybe = self.apply_callback(plots)
-        if asyncio.iscoroutine(maybe):
-            await maybe
-
-    async def refresh_now(self, force: bool = True) -> Dict[str, Dict]:
-        plots = await asyncio.to_thread(self.plot_service.get_plots_dict, force)
-        if plots:
-            await self._apply(plots)
-        self._last_cycle = datetime.now()
-        return plots
-
-    async def _loop(self) -> None:
-        while self._running:
-            try:
-                await asyncio.to_thread(self.plot_service.health_ping)
-                await self.refresh_now(force=True)
-            except Exception as e:
-                self.plot_service.last_error = str(e)
-            await asyncio.sleep(random.uniform(self.min_interval_seconds, self.max_interval_seconds))
-
-    async def start(self) -> None:
-        if self._task and not self._task.done():
-            return
-        self._running = True
-        self._task = asyncio.create_task(self._loop())
-
-    async def stop(self) -> None:
-        self._running = False
-        if self._task and not self._task.done():
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
-
-    def status(self) -> Dict[str, Any]:
-        return {
-            "running": bool(self._task and not self._task.done()),
-            "last_cycle": self._last_cycle.isoformat() if self._last_cycle else None,
-            "interval_seconds": [self.min_interval_seconds, self.max_interval_seconds],
-            "plot_sync": self.plot_service.get_refresh_stats(),
-        }
