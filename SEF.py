@@ -922,6 +922,6 @@ if __name__ == "__main__":
         "SEF:app",
         host="0.0.0.0",
         port=7002,
-        reload=True
+        reload=False
     )
  
