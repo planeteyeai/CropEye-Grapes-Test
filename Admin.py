@@ -3,7 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from typing import List, Dict, Optional, Any, Union
-import ee
+import ee 
 import json
 import requests
 from datetime import datetime, timedelta, date
