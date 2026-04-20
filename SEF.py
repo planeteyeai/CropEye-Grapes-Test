@@ -403,15 +403,15 @@ class VegetationHealthAnalyzer:
 async def lifespan(app: FastAPI):
     try:
         global plot_dict
-        print("🔄 Admin.py: Initializing application and fetching plots from Django API...")
+        print("🔄 SEF.py: Initializing application and fetching plots from Django API...")
 
         # Fetch once at startup (force refresh)
         plot_dict = await asyncio.to_thread(
             plot_sync_service.get_plots_dict, True
         )
 
-        print(f"✅ Admin.py startup: Loaded {len(plot_dict)} plots from Django")
-        print("🚀 Admin.py: Application initialized successfully")
+        print(f"✅ SEF.py startup: Loaded {len(plot_dict)} plots from Django")
+        print("🚀 SEF.py: Application initialized successfully")
 
     except Exception as e:
         print(f"❌ Failed to initialize application: {e}")
