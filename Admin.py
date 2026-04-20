@@ -19,9 +19,10 @@ from fastapi import FastAPI, Request
 from pydantic import BaseModel
 from shapely.geometry import shape, Point, Polygon
 from geopy.distance import geodesic
-from shared_services import PlotSyncService, PlotKeepAliveManager
+from shared_services import PlotSyncService
 from events import generate_brix_time_series, compute_brix_image
 import pandas as pd
+import asyncio
 # Initialize Earth Engine - move this to the top
 raw = os.environ["EE_SERVICE_ACCOUNT_JSON"]
 service_account = raw if isinstance(raw, str) else json.dumps(raw)
@@ -161,7 +162,6 @@ indexVisParams = {
 
 # Initialize plot sync service
 plot_sync_service = PlotSyncService()
-keepalive_manager: Optional[PlotKeepAliveManager] = None
 plot_dict: Dict[str, Dict[str, Any]] = {}
 
 def _apply_plot_update(new_plots: Dict[str, Dict[str, Any]]) -> None:
@@ -218,26 +218,28 @@ def get_tile_url(image, vis_params, name):
         print(f"Error generating tile URL for {name}: {str(e)}")
         return None
 
-# Initialize Earth Engine and load data
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
     try:
-        global plot_dict, keepalive_manager
-        print("?? Admin.py: Initializing application and fetching plots from Django API...")
-        keepalive_manager = PlotKeepAliveManager(plot_sync_service, _apply_plot_update, 3.0, 5.0)
-        plot_dict = await keepalive_manager.refresh_now(force=True)
-        await keepalive_manager.start()
-        print(f"? Admin.py startup: Loaded {len(plot_dict)} plots from Django")
-        print("? Admin.py: Application initialized successfully")
+        global plot_dict
+        print("🔄 Admin.py: Initializing application and fetching plots from Django API...")
+
+        # Fetch once at startup (force refresh)
+        plot_dict = await asyncio.to_thread(
+            plot_sync_service.get_plots_dict, True
+        )
+
+        print(f"✅ Admin.py startup: Loaded {len(plot_dict)} plots from Django")
+        print("🚀 Admin.py: Application initialized successfully")
+
     except Exception as e:
-        print(f"Failed to initialize application: {e}")
+        print(f"❌ Failed to initialize application: {e}")
         raise
+
     yield
-    # Shutdown
-    if keepalive_manager:
-        await keepalive_manager.stop()
-    print("Shutting down FastAPI application")
+
+    # Shutdown (no keepalive to stop anymore)
+    print("🛑 Shutting down FastAPI application")
 
 # Create FastAPI app
 app = FastAPI(
