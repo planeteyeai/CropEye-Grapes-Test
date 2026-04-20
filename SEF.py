@@ -14,8 +14,9 @@ import httpx
 import math
 import json
 from contextlib import asynccontextmanager
-from shared_services import PlotSyncService, PlotKeepAliveManager
+from shared_services import PlotSyncService
 from fastapi.middleware.cors import CORSMiddleware
+import asyncio
 # Initialize Earth Engine
 raw = os.environ["EE_SERVICE_ACCOUNT_JSON"]
 service_account = raw if isinstance(raw, str) else json.dumps(raw)
@@ -37,7 +38,7 @@ app.add_middleware(
  
 plot_dict = plot_sync_service.get_plots_dict()
 print(f"ðŸš€ events.py startup: Loaded {len(plot_dict)} plots from Django")
-keepalive_manager: Optional[PlotKeepAliveManager] = None
+
 
 def _apply_plot_update(new_plots: Dict[str, Dict]) -> None:
     global plot_dict
@@ -400,12 +401,26 @@ class VegetationHealthAnalyzer:
 # Initialize FastAPI app
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global keepalive_manager
-    keepalive_manager = PlotKeepAliveManager(plot_sync_service, _apply_plot_update, 3.0, 5.0)
-    await keepalive_manager.refresh_now(force=True)
-    await keepalive_manager.start()
+    try:
+        global plot_dict
+        print("🔄 Admin.py: Initializing application and fetching plots from Django API...")
+
+        # Fetch once at startup (force refresh)
+        plot_dict = await asyncio.to_thread(
+            plot_sync_service.get_plots_dict, True
+        )
+
+        print(f"✅ Admin.py startup: Loaded {len(plot_dict)} plots from Django")
+        print("🚀 Admin.py: Application initialized successfully")
+
+    except Exception as e:
+        print(f"❌ Failed to initialize application: {e}")
+        raise
+
     yield
-    await keepalive_manager.stop()
+
+    # Shutdown (no keepalive to stop anymore)
+    print("🛑 Shutting down FastAPI application")
 
 app = FastAPI(
     title="Sentinel-1 SAR Vegetation Health Analysis API",
