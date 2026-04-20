@@ -68,7 +68,7 @@ class PlotSyncService:
     Service to fetch plot data from Django /plots/ API
     """
     
-    def __init__(self, django_api_url: str = ""):
+    def __init__(self, django_api_url: str = "https://fn8xs9nr-8002.inc1.devtunnels.ms/"):
         self.django_api_url = django_api_url
         self.plots_cache = {}
         self.last_sync = None
@@ -163,6 +163,8 @@ class PlotSyncService:
             if farms:
                 plantation_date = farms[0].get('plantation_date')
                 plantation_type = farms[0].get('plantation_type')
+                foundation_pruning_date = farms[0].get('foundation_pruning_date')
+                fruit_pruning_date = farms[0].get('fruit_pruning_date')
                 if crop_type_name is None:
                     crop_type_name = farms[0].get('crop_type_name')
                 if crop_type_name is None and isinstance(farms[0].get('crop_type'), dict):
@@ -256,4 +258,3 @@ class PlotSyncService:
 
 
     
-
