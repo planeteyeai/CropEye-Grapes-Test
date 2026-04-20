@@ -15,6 +15,7 @@ import numpy as np
 from events import calculate_brix_sugar_stats1,get_brix_recovery_sugar_yield_images
 import hashlib
 from datetime import datetime, timedelta, date
+import asyncio
 # ------------------------------
 # Initialize Earth Engine
 # ------------------------------
@@ -32,7 +33,6 @@ _init_earth_engine()
 # FastAPI Setup
 # ------------------------------
 
-keepalive_manager: Optional[PlotKeepAliveManager] = None
 
 def _apply_plot_update(new_plots: Dict[str, Dict]) -> None:
     global plot_dict
@@ -61,12 +61,26 @@ def _resolve_plot_or_refresh(plot_identifier: str):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global keepalive_manager, plot_dict
-    keepalive_manager = PlotKeepAliveManager(plot_sync_service, _apply_plot_update, 3.0, 5.0)
-    await keepalive_manager.refresh_now(force=True)
-    await keepalive_manager.start()
+    try:
+        global plot_dict
+        print("🔄 main.py: Initializing application and fetching plots from Django API...")
+
+        # Fetch once at startup (force refresh)
+        plot_dict = await asyncio.to_thread(
+            plot_sync_service.get_plots_dict, True
+        )
+
+        print(f"✅ main.py startup: Loaded {len(plot_dict)} plots from Django")
+        print("🚀 main.py: Application initialized successfully")
+
+    except Exception as e:
+        print(f"❌ Failed to initialize application: {e}")
+        raise
+
     yield
-    await keepalive_manager.stop()
+
+    # Shutdown (no keepalive to stop anymore)
+    print("🛑 Shutting down FastAPI application")
 
 app = FastAPI(
     title="Soil Parameter Analysis API with NPK and SAR-based Fe Analysis",
