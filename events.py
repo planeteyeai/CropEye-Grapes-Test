@@ -4,7 +4,7 @@ import os
 from shapely import geometry
 import json
 from contextlib import asynccontextmanager
-
+import asyncio
 from fastapi import FastAPI, HTTPException, Query
 import pandas as pd 
 from cachetools import TTLCache 
@@ -21,7 +21,7 @@ from shapely.geometry import shape, Point, Polygon
 from geopy.distance import geodesic  
 import matplotlib.colors as mcolors
 import numpy as np
-from shared_services import PlotSyncService, PlotKeepAliveManager, _clean_numbers
+from shared_services import PlotSyncService, _clean_numbers
 # from Admin import calculate_area_hectares
  
  
@@ -43,7 +43,7 @@ plot_sync_service = PlotSyncService()
  
 plot_dict = plot_sync_service.get_plots_dict()
 print(f"ðŸš€ events.py startup: Loaded {len(plot_dict)} plots from Django")
-keepalive_manager: Optional[PlotKeepAliveManager] = None
+
 
 def calculate_area_hectares(geometry):
     """Calculate area in hectares"""
@@ -139,12 +139,26 @@ def _resolve_plot_or_refresh(plot_identifier: str):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global keepalive_manager
-    keepalive_manager = PlotKeepAliveManager(plot_sync_service, _apply_plot_update, 3.0, 5.0)
-    await keepalive_manager.refresh_now(force=True)
-    await keepalive_manager.start()
+    try:
+        global plot_dict
+        print("🔄 Admin.py: Initializing application and fetching plots from Django API...")
+
+        # Fetch once at startup (force refresh)
+        plot_dict = await asyncio.to_thread(
+            plot_sync_service.get_plots_dict, True
+        )
+
+        print(f"✅ Admin.py startup: Loaded {len(plot_dict)} plots from Django")
+        print("🚀 Admin.py: Application initialized successfully")
+
+    except Exception as e:
+        print(f"❌ Failed to initialize application: {e}")
+        raise
+
     yield
-    await keepalive_manager.stop()
+
+    # Shutdown (no keepalive to stop anymore)
+    print("🛑 Shutting down FastAPI application")
 
 def _round_safe(val, digits=4):
     try:
