@@ -22,6 +22,7 @@ from geopy.distance import geodesic
 from shared_services import PlotSyncService
 from events import generate_brix_time_series, compute_brix_image
 import pandas as pd
+from contextlib import asynccontextmanager
 import asyncio
 # Initialize Earth Engine - move this to the top
 raw = os.environ["EE_SERVICE_ACCOUNT_JSON"]
@@ -240,7 +241,6 @@ async def lifespan(app: FastAPI):
 
     # Shutdown (no keepalive to stop anymore)
     print("🛑 Shutting down FastAPI application")
-
 # Create FastAPI app
 app = FastAPI(
     title="SAR Index Mapping API with Pest Detection",
@@ -2419,22 +2419,16 @@ def calculate_distances(
         'average_distance_km': average_distance}
         
 
-@app.post("/refresh-from-django")
+@app.api_route("/refresh-from-django", methods=["GET", "POST"], operation_id="refresh_from_django")
 async def refresh_from_django():
-    """Manually refresh all plots from Django - useful after Django restart"""
     try:
         global plot_dict
-        print("?? Manual refresh from Django requested...")
-        # Force refresh from Django
-        if keepalive_manager:
-            plot_dict = await keepalive_manager.refresh_now(force=True)
-        else:
-            plot_dict = plot_sync_service.get_plots_dict(force_refresh=True)
+        plot_dict = plot_sync_service.get_plots_dict(force_refresh=True)
         return {
-            "status": "success", 
+            "status": "success",
             "message": f"Successfully refreshed {len(plot_dict)} plots from Django",
             "plot_count": len(plot_dict),
-            "plots_with_django_ids": len([p for p in plot_dict.values() if p.get('properties', {}).get('django_id')])
+            "plots_with_django_ids": len([p for p in plot_dict.values() if p.get("properties", {}).get("django_id")]),
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to refresh from Django: {str(e)}")
