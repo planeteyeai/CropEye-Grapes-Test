@@ -2263,8 +2263,7 @@ async def health_check():
     return {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
-        "plot_count": len(plot_dict),
-        "keepalive": keepalive_manager.status() if keepalive_manager else None
+        "plot_count": len(plot_dict)
     }
  
 @app.get("/plots/{plot_name}/tiles")
