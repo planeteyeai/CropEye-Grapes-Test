@@ -1,10 +1,10 @@
   # Includes Brix/Recovery analysis, vegetation indices, biomass, stress events, and irrigation detection
 # Comprehensive Agriculture Analysis API - Merged Version
+import asyncio
 import os
 from shapely import geometry
 import json
 from contextlib import asynccontextmanager
-import asyncio
 from fastapi import FastAPI, HTTPException, Query
 import pandas as pd 
 from cachetools import TTLCache 
@@ -1259,8 +1259,7 @@ async def health_check():
         "service": "Comprehensive Agriculture Analysis API",
         "data_source": "Django /plots/ API",
         "plot_count": len(plot_dict),
-        "last_sync": plot_sync_service.last_sync.isoformat() if plot_sync_service.last_sync else None,
-        "keepalive": keepalive_manager.status() if keepalive_manager else None
+        "last_sync": plot_sync_service.last_sync.isoformat() if plot_sync_service.last_sync else None
     }
 
 @app.get("/plots/debug")
@@ -3166,26 +3165,22 @@ async def get_sync_status():
         "total_plots": len(plot_dict),
         "plots_with_django_ids": len([p for p in plot_dict.values() if p.get("django_id")]),
         "plots_from_geojson": len([p for p in plot_dict.values() if not p.get("django_id")]),
-        "status": "active",
-        "keepalive": keepalive_manager.status() if keepalive_manager else None
+        "status": "active"
     }
 
-@app.post("/refresh-from-django")
+@app.api_route("/refresh-from-django", methods=["GET", "POST"], operation_id="refresh_from_django")
 async def refresh_from_django():
-    """Manually refresh all plots from Django - useful after Django restart"""
     try:
-        global plot_dict, plot_fc
-        print("ðŸ”„ Manual refresh from Django requested for events.py...")
-        if keepalive_manager:
-            plot_dict = await keepalive_manager.refresh_now(force=True)
-            plot_fc = get_plot_feature_collection()
-        else:
-            plot_dict = plot_sync_service.get_plots_dict(force_refresh=True)
-        return {"status": "success", "message": f"Refreshed {len(plot_dict)} plots."}
+        global plot_dict
+        plot_dict = plot_sync_service.get_plots_dict(force_refresh=True)
+        return {
+            "status": "success",
+            "message": f"Successfully refreshed {len(plot_dict)} plots from Django",
+            "plot_count": len(plot_dict),
+            "plots_with_django_ids": len([p for p in plot_dict.values() if p.get("properties", {}).get("django_id")]),
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to refresh from Django: {str(e)}")
-
- 
 # -------------------------------
 # Run Server
 # -------------------------------
