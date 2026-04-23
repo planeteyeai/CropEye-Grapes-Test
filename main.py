@@ -1035,6 +1035,12 @@ def get_required_n_merged(
         )
 
         gndvi = npk["average_n"]
+        if max_yield is None:
+            max_yield = 0
+
+        if gndvi is None:
+            gndvi = 0
+
         required_n = max(0, (max_yield * 6 - gndvi))
 
         soilN = (required_n / 100) * 166
