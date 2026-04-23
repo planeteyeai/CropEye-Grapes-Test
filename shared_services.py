@@ -68,7 +68,7 @@ class PlotSyncService:
     Service to fetch plot data from Django /plots/ API
     """
     
-    def __init__(self, django_api_url: str = "https://fn8xs9nr-8002.inc1.devtunnels.ms/"):
+    def __init__(self, django_api_url: str = "https://cropeye-backendd.up.railway.app"):
         self.django_api_url = django_api_url
         self.plots_cache = {}
         self.last_sync = None
